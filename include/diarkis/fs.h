@@ -61,6 +61,16 @@ namespace fs {
         std::string root_watch_dir;
         std::atomic<bool> running;
         std::thread watch_thread;
+
+        struct MoveContext {
+            std::string from_path;
+            uint32_t cookie;
+            bool is_dir;
+            std::chrono::steady_clock::time_point time;
+        };
+
+        std::map<uint32_t, MoveContext> pending_moves;
+        std::mutex move_mutex;
     };
 
 };

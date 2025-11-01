@@ -1,6 +1,7 @@
 
 #include "diarkis/fs.h"
 
+#include <poll.h>
 #include <cstring>
 #include <vector>
 #include <unistd.h>
@@ -14,8 +15,7 @@ namespace fs {
 
 static bool isDirectory(const std::string& path) {
     struct stat st;
-    if (stat(path.c_str(), &st) == 0) return false;
-    return S_ISDIR(st.st_mode);
+    return (stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode));
 }
 
 static void listSubdirs(const std::string& path, std::vector<std::string>& dirs) {
@@ -151,23 +151,72 @@ void Watcher::watchLoop() {
     const size_t BUF_SIZE = 4096;
     char buffer[BUF_SIZE] __attribute__((aligned(__alignof__(struct inotify_event))));
 
+    struct pollfd pfd;
+    pfd.fd = inotify_fd;
+    pfd.events = POLLIN; // read events only
+
     while (running) {
-        ssize_t len = read(inotify_fd, buffer, BUF_SIZE);
-        
-        if (len < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        int poll_result = poll(&pfd, 1, 1000); // poll every 1 second
+
+        if (poll_result < 0) {
+            if (errno == EINTR) {
+                // interrupted by signal, continue
                 continue;
-            } else {
-                spdlog::error("Filesystem Watcher: Error reading inotify events\n\t{}", strerror(errno));
-                break;
+            }
+            spdlog::error("Filesystem Watcher: poll() error\n\t{}", strerror(errno));
+            break;
+        }
+
+        if (pfd.revents & POLLIN) {
+            // data is available to read
+            ssize_t len = read(inotify_fd, buffer, BUF_SIZE);
+            
+            if (len < 0) {
+                if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                    // should not happen with poll, fallback
+                    continue;
+                } else {
+                    spdlog::error("Filesystem Watcher: Error reading inotify events\n\t{}", strerror(errno));
+                    break;
+                }
+            }
+
+            const struct inotify_event* event;
+            for (char* ptr = buffer; ptr < buffer + len; ptr += sizeof(struct inotify_event) + event->len) {
+                event = reinterpret_cast<const struct inotify_event*>(ptr);
+                handleEvent(event);
             }
         }
 
-        const struct inotify_event* event;
-        for (char* ptr = buffer; ptr < buffer + len; ptr += sizeof(struct inotify_event) + event->len) {
-            event = reinterpret_cast<const struct inotify_event*>(ptr);
-            handleEvent(event);
+        // handle pending moves (more than 5 seconds)
+        // pending means that the file was moved outside the observed directory tree, so we handle it as a delete
+        {
+            std::lock_guard<std::mutex> lock(move_mutex);
+            auto now = std::chrono::steady_clock::now();
+            for (auto it = pending_moves.begin(); it != pending_moves.end();) {
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - it->second.time).count();
+                if (elapsed > 5) {
+                    Event file_event;
+                    file_event.type = EventType::DELETED;
+                    file_event.path = it->second.from_path;
+                    file_event.relative_path = it->second.from_path.substr(root_watch_dir.size());
+                    if (file_event.relative_path[0] == '/') {
+                        file_event.relative_path = file_event.relative_path.substr(1);
+                    }
+                    file_event.is_dir = it->second.is_dir;
+
+                    {
+                        std::lock_guard<std::mutex> cb_lock(callback_mutex);
+                        if (callback) {
+                            callback(file_event);
+                        }
+                    }
+                    
+                    it = pending_moves.erase(it);
+                } else {
+                    ++it;
+                }
+            }
         }
     }
 }
@@ -211,6 +260,34 @@ void Watcher::handleEvent(const struct inotify_event* event) {
         }
     } else if (event->mask & IN_MODIFY) {
         file_event.type = EventType::MODIFIED;
+    } else if (event->mask & IN_MOVED_FROM) {
+        std::lock_guard<std::mutex> lock(move_mutex);
+        pending_moves[event->cookie] = {
+            full_path,
+            event->cookie,
+            is_dir,
+            std::chrono::steady_clock::now()
+        };
+        return;
+    } else if (event->mask & IN_MOVED_TO) {
+        file_event.type = EventType::MOVED;
+
+        std::lock_guard<std::mutex> lock(move_mutex);
+        auto it = pending_moves.find(event->cookie);
+        if (it != pending_moves.end()) {
+            file_event.old_path = it->second.from_path;
+            pending_moves.erase(it);
+        } else {
+            // file moved from outside observed dir tree to inside, treat it as create
+            file_event.type = EventType::CREATED;
+            if (is_dir) {
+                addWatch(full_path);
+            }
+        }
+        
+        if (is_dir) {
+            addWatch(full_path);
+        }
     } else {
         return;
     }
