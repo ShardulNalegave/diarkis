@@ -136,8 +136,8 @@ bool Node::proposeEvent(const events::Event& event) {
     
     node->apply(task);
     
-    spdlog::debug("Proposed event: type={}, path={}, size={} bytes", 
-        static_cast<int>(event.type), event.path, size);
+    spdlog::debug("Proposed event: type={}, relative_path={}, size={} bytes", 
+        static_cast<int>(event.type), event.relative_path, size);
     
     return true;
 }

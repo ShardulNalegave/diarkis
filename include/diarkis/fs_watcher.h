@@ -36,6 +36,7 @@ namespace fs {
 
         std::string getPathFromWD(int wd) const;
         int getWDFromPath(const std::string& path) const;
+        std::string getRelativePath(const std::string& full_path) const;
 
         std::map<int, std::string> wd_to_path;
         std::map<std::string, int> path_to_wd;
@@ -50,7 +51,7 @@ namespace fs {
         std::thread watch_thread;
 
         struct MoveContext {
-            std::string from_path;
+            std::string from_relative_path;
             uint32_t cookie;
             bool is_dir;
             std::chrono::steady_clock::time_point time;

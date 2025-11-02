@@ -228,15 +228,15 @@ bool Replicator::applyEvent(const events::Event& event) {
             }
             
         case events::EventType::MOVED:
-            if (!event.old_path.empty()) {
-                std::string old_full_path = event.old_path;
+            if (!event.old_relative_path.empty()) {
+                std::string old_full_path = root_dir + "/" + event.old_relative_path;
                 if (event.is_dir) {
                     return moveDirectory(old_full_path, full_path);
                 } else {
                     return moveFile(old_full_path, full_path);
                 }
             }
-            spdlog::warn("MOVED event without old_path, treating as CREATE");
+            spdlog::warn("MOVED event without old_relative_path, treating as CREATE");
             if (event.is_dir) {
                 return createDirectory(full_path);
             } else {

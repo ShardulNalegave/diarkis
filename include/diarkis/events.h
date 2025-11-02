@@ -16,12 +16,11 @@ namespace events {
 
     struct Event {
         EventType type;
-        std::string path;
-        std::string relative_path;
+        std::string relative_path;      // relative path from root
         bool is_dir;
 
-        std::string old_path; // old path, used only for MOVED event type
-        std::string contents; // file contents, used only for CREATED/MODIFIED event types
+        std::string old_relative_path;  // old relative path, used only for MOVED event type
+        std::string contents;           // file contents, used only for CREATED/MODIFIED event types
 
         size_t getSerializedSize() const;
         std::pair<const char*, size_t> serialize() const;

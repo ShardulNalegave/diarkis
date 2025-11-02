@@ -45,7 +45,7 @@ void onRaftApply(const events::Event& event) {
 
     spdlog::info("[RAFT APPLY EVENT] {}: Item = {}", evt_type, event.relative_path);
 
-    if (g_replicator) {
+    if (g_replicator && !g_raft_node.get()->isLeader()) {
         if (!g_replicator->applyEvent(event)) {
             spdlog::error("Failed to apply replicated event: {} {}", evt_type, event.relative_path);
         }

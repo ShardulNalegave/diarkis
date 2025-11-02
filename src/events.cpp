@@ -67,9 +67,8 @@ size_t Event::getSerializedSize() const {
     size += sizeof(uint8_t);   // is_dir
     
     // length prefix + data
-    size += sizeof(uint32_t) + path.size();
     size += sizeof(uint32_t) + relative_path.size();
-    size += sizeof(uint32_t) + old_path.size();
+    size += sizeof(uint32_t) + old_relative_path.size();
     size += sizeof(uint32_t) + contents.size();
     
     return size;
@@ -85,9 +84,8 @@ std::pair<const char*, size_t> Event::serialize() const {
     writeUint8(buffer, is_dir ? 1 : 0);
     
     // strings with length prefixes
-    writeString(buffer, path);
     writeString(buffer, relative_path);
-    writeString(buffer, old_path);
+    writeString(buffer, old_relative_path);
     writeString(buffer, contents);
     
     // this buffer is only valid until next call to serialize()
@@ -125,9 +123,8 @@ Event Event::deserialize(const char* bytes, size_t size) {
         uint8_t is_dir_byte = readUint8(ptr, end);
         event.is_dir = (is_dir_byte != 0);
 
-        event.path = readString(ptr, end);
         event.relative_path = readString(ptr, end);
-        event.old_path = readString(ptr, end);
+        event.old_relative_path = readString(ptr, end);
         event.contents = readString(ptr, end);
 
         if (ptr != end) {

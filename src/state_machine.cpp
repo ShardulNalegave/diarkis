@@ -27,8 +27,8 @@ void StateMachine::on_apply(braft::Iterator& iter) {
             continue;
         }
         
-        spdlog::info("Applying op at index {}: type={}, path={}", 
-            iter.index(), static_cast<int>(event.type), event.path);
+        spdlog::info("Applying op at index {}: type={}, relative_path={}", 
+            iter.index(), static_cast<int>(event.type), event.relative_path);
         
         if (apply_callback && *apply_callback) {
             (*apply_callback)(event);

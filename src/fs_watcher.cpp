@@ -74,7 +74,9 @@ static void listSubdirs(const std::string& path, std::vector<std::string>& dirs)
 
 Watcher::Watcher(const std::string& watch_dir, events::EventHandler callback_)
     : root_watch_dir(watch_dir), running(false), callback(callback_), inotify_fd(-1) {
-    //
+    if (!root_watch_dir.empty() && root_watch_dir.back() == '/') {
+        root_watch_dir.pop_back();
+    }
 }
 
 Watcher::~Watcher() {
@@ -196,20 +198,32 @@ int Watcher::getWDFromPath(const std::string& path) const {
     return (it != path_to_wd.end()) ? it->second : -1;
 }
 
+std::string Watcher::getRelativePath(const std::string& full_path) const {
+    if (full_path.size() <= root_watch_dir.size()) {
+        return "";
+    }
+    
+    std::string relative = full_path.substr(root_watch_dir.size());
+    if (!relative.empty() && relative[0] == '/') {
+        relative = relative.substr(1);
+    }
+    
+    return relative;
+}
+
 void Watcher::watchLoop() {
     const size_t BUF_SIZE = 4096;
     char buffer[BUF_SIZE] __attribute__((aligned(__alignof__(struct inotify_event))));
 
     struct pollfd pfd;
     pfd.fd = inotify_fd;
-    pfd.events = POLLIN; // read events only
+    pfd.events = POLLIN;
 
     while (running) {
-        int poll_result = poll(&pfd, 1, 1000); // poll every 1 second
+        int poll_result = poll(&pfd, 1, 1000);
 
         if (poll_result < 0) {
             if (errno == EINTR) {
-                // interrupted by signal, continue
                 continue;
             }
             spdlog::error("Filesystem Watcher: poll() error\n\t{}", strerror(errno));
@@ -217,12 +231,10 @@ void Watcher::watchLoop() {
         }
 
         if (pfd.revents & POLLIN) {
-            // data is available to read
             ssize_t len = read(inotify_fd, buffer, BUF_SIZE);
             
             if (len < 0) {
                 if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                    // should not happen with poll, fallback
                     continue;
                 } else {
                     spdlog::error("Filesystem Watcher: Error reading inotify events\n\t{}", strerror(errno));
@@ -247,14 +259,11 @@ void Watcher::watchLoop() {
                 if (elapsed > 5) {
                     events::Event file_event;
                     file_event.type = events::EventType::DELETED;
-                    file_event.path = it->second.from_path;
-                    file_event.relative_path = it->second.from_path.substr(root_watch_dir.size());
-                    if (file_event.relative_path[0] == '/') {
-                        file_event.relative_path = file_event.relative_path.substr(1);
-                    }
+                    file_event.relative_path = it->second.from_relative_path;
                     file_event.is_dir = it->second.is_dir;
 
-                    if (!shouldIgnoreEvent(file_event.path)) {
+                    std::string full_path = root_watch_dir + "/" + file_event.relative_path;
+                    if (!shouldIgnoreEvent(full_path)) {
                         std::lock_guard<std::mutex> cb_lock(callback_mutex);
                         if (callback) {
                             callback(file_event);
@@ -288,11 +297,7 @@ void Watcher::handleEvent(const struct inotify_event* event) {
     }
 
     events::Event file_event;
-    file_event.path = full_path;
-    file_event.relative_path = full_path.substr(root_watch_dir.size());
-    if (file_event.relative_path[0] == '/') {
-        file_event.relative_path = file_event.relative_path.substr(1);
-    }
+    file_event.relative_path = getRelativePath(full_path);
     file_event.is_dir = is_dir;
 
     if (event->mask & IN_CREATE) {
@@ -322,7 +327,7 @@ void Watcher::handleEvent(const struct inotify_event* event) {
     } else if (event->mask & IN_MOVED_FROM) {
         std::lock_guard<std::mutex> lock(move_mutex);
         pending_moves[event->cookie] = {
-            full_path,
+            getRelativePath(full_path),
             event->cookie,
             is_dir,
             std::chrono::steady_clock::now()
@@ -334,7 +339,7 @@ void Watcher::handleEvent(const struct inotify_event* event) {
         std::lock_guard<std::mutex> lock(move_mutex);
         auto it = pending_moves.find(event->cookie);
         if (it != pending_moves.end()) {
-            file_event.old_path = it->second.from_path;
+            file_event.old_relative_path = it->second.from_relative_path;
             pending_moves.erase(it);
         } else {
             // file moved from outside observed dir tree to inside, treat it as create
