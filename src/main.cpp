@@ -6,7 +6,9 @@
 #include <chrono>
 #include "spdlog/spdlog.h"
 
-#include "diarkis/fs.h"
+#include "diarkis/events.h"
+#include "diarkis/fs_watcher.h"
+#include "diarkis/state_machine.h"
 
 std::atomic<bool> g_running = true;
 
@@ -21,19 +23,19 @@ int main() {
     signal(SIGINT, signalHandler);
     signal(SIGTERM, signalHandler);
 
-    auto watcher = std::make_unique<fs::Watcher>("../test_dir", [](const fs::Event& event) {
+    auto watcher = std::make_unique<fs::Watcher>("../test_dir", [](const events::Event& event) {
         std::string evt_type = "";
         switch (event.type) {
-            case fs::EventType::CREATED:
+            case events::EventType::CREATED:
                 evt_type = "CREATED";
                 break;
-            case fs::EventType::DELETED:
+            case events::EventType::DELETED:
                 evt_type = "DELETED";
                 break;
-            case fs::EventType::MODIFIED:
+            case events::EventType::MODIFIED:
                 evt_type = "MODIFIED";
                 break;
-            case fs::EventType::MOVED:
+            case events::EventType::MOVED:
                 evt_type = "MOVED";
                 break;
         }

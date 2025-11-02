@@ -1,5 +1,5 @@
 
-#include "diarkis/fs.h"
+#include "diarkis/fs_watcher.h"
 
 #include <poll.h>
 #include <cstring>
@@ -40,7 +40,7 @@ static void listSubdirs(const std::string& path, std::vector<std::string>& dirs)
     closedir(dir);
 }
 
-Watcher::Watcher(const std::string& watch_dir, EventCallback callback_)
+Watcher::Watcher(const std::string& watch_dir, events::EventHandler callback_)
     : root_watch_dir(watch_dir), running(false), callback(callback_), inotify_fd(-1) {
     //
 }
@@ -196,8 +196,8 @@ void Watcher::watchLoop() {
             for (auto it = pending_moves.begin(); it != pending_moves.end();) {
                 auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - it->second.time).count();
                 if (elapsed > 5) {
-                    Event file_event;
-                    file_event.type = EventType::DELETED;
+                    events::Event file_event;
+                    file_event.type = events::EventType::DELETED;
                     file_event.path = it->second.from_path;
                     file_event.relative_path = it->second.from_path.substr(root_watch_dir.size());
                     if (file_event.relative_path[0] == '/') {
@@ -234,7 +234,7 @@ void Watcher::handleEvent(const struct inotify_event* event) {
     std::string full_path = dir_path + "/" + event->name;
     bool is_dir = (event->mask & IN_ISDIR) != 0;
 
-    Event file_event;
+    events::Event file_event;
     file_event.path = full_path;
     file_event.relative_path = full_path.substr(root_watch_dir.size());
     if (file_event.relative_path[0] == '/') {
@@ -243,13 +243,13 @@ void Watcher::handleEvent(const struct inotify_event* event) {
     file_event.is_dir = is_dir;
 
     if (event->mask & IN_CREATE) {
-        file_event.type = EventType::CREATED;
+        file_event.type = events::EventType::CREATED;
         
         if (is_dir) {
             addWatch(full_path);
         }
     } else if (event->mask & IN_DELETE) {
-        file_event.type = EventType::DELETED;
+        file_event.type = events::EventType::DELETED;
         
         if (is_dir) {
             std::lock_guard<std::mutex> lock(watch_map_mutex);
@@ -259,7 +259,7 @@ void Watcher::handleEvent(const struct inotify_event* event) {
             }
         }
     } else if (event->mask & IN_MODIFY) {
-        file_event.type = EventType::MODIFIED;
+        file_event.type = events::EventType::MODIFIED;
     } else if (event->mask & IN_MOVED_FROM) {
         std::lock_guard<std::mutex> lock(move_mutex);
         pending_moves[event->cookie] = {
@@ -270,7 +270,7 @@ void Watcher::handleEvent(const struct inotify_event* event) {
         };
         return;
     } else if (event->mask & IN_MOVED_TO) {
-        file_event.type = EventType::MOVED;
+        file_event.type = events::EventType::MOVED;
 
         std::lock_guard<std::mutex> lock(move_mutex);
         auto it = pending_moves.find(event->cookie);
@@ -279,7 +279,7 @@ void Watcher::handleEvent(const struct inotify_event* event) {
             pending_moves.erase(it);
         } else {
             // file moved from outside observed dir tree to inside, treat it as create
-            file_event.type = EventType::CREATED;
+            file_event.type = events::EventType::CREATED;
             if (is_dir) {
                 addWatch(full_path);
             }
