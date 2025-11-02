@@ -31,6 +31,7 @@ set(DIARKIS_SOURCES
     src/main.cpp
     src/events.cpp
     src/fs_watcher.cpp
+    src/fs_replicator.cpp
     src/state_machine.cpp
     src/raft_node.cpp)
 

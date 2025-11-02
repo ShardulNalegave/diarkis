@@ -127,6 +127,23 @@ void Watcher::stop() {
     spdlog::info("Filesystem Watcher stopped");
 }
 
+void Watcher::ignoreNextEvent(const std::string& path) {
+    std::lock_guard<std::mutex> lock(ignore_mutex);
+    ignored_paths.insert(path);
+    spdlog::debug("Added to ignore list: {}", path);
+}
+
+bool Watcher::shouldIgnoreEvent(const std::string& path) {
+    std::lock_guard<std::mutex> lock(ignore_mutex);
+    auto it = ignored_paths.find(path);
+    if (it != ignored_paths.end()) {
+        ignored_paths.erase(it);
+        spdlog::debug("Ignoring event for: {}", path);
+        return true;
+    }
+    return false;
+}
+
 bool Watcher::addWatch(const std::string& path) {
     uint32_t mask = IN_CREATE | IN_DELETE | IN_MODIFY | 
                     IN_MOVED_FROM | IN_MOVED_TO |
@@ -237,7 +254,7 @@ void Watcher::watchLoop() {
                     }
                     file_event.is_dir = it->second.is_dir;
 
-                    {
+                    if (!shouldIgnoreEvent(file_event.path)) {
                         std::lock_guard<std::mutex> cb_lock(callback_mutex);
                         if (callback) {
                             callback(file_event);
@@ -265,6 +282,10 @@ void Watcher::handleEvent(const struct inotify_event* event) {
     
     std::string full_path = dir_path + "/" + event->name;
     bool is_dir = (event->mask & IN_ISDIR) != 0;
+
+    if (shouldIgnoreEvent(full_path)) {
+        return;
+    }
 
     events::Event file_event;
     file_event.path = full_path;

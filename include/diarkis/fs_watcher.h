@@ -5,6 +5,7 @@
 #include <string>
 #include <functional>
 #include <map>
+#include <set>
 #include <mutex>
 #include <thread>
 #include <atomic>
@@ -22,6 +23,9 @@ namespace fs {
         bool start();
         void stop();
         bool isRunning() const { return running; };
+
+        void ignoreNextEvent(const std::string& path);
+        bool shouldIgnoreEvent(const std::string& path);
 
     private:
         void watchLoop();
@@ -54,6 +58,9 @@ namespace fs {
 
         std::map<uint32_t, MoveContext> pending_moves;
         std::mutex move_mutex;
+
+        std::set<std::string> ignored_paths;
+        std::mutex ignore_mutex;
     };
 
 };

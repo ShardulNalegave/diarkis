@@ -10,12 +10,14 @@
 
 #include "diarkis/events.h"
 #include "diarkis/fs_watcher.h"
+#include "diarkis/fs_replicator.h"
 #include "diarkis/state_machine.h"
 #include "diarkis/raft_node.h"
 
 std::atomic<bool> g_running{true};
 std::unique_ptr<fs::Watcher> g_watcher;
 std::unique_ptr<raft::Node> g_raft_node;
+std::unique_ptr<fs::Replicator> g_replicator;
 
 void signalHandler(int signal) {
     if (signal == SIGINT || signal == SIGTERM) {
@@ -42,6 +44,12 @@ void onRaftApply(const events::Event& event) {
     }
 
     spdlog::info("[RAFT APPLY EVENT] {}: Item = {}", evt_type, event.relative_path);
+
+    if (g_replicator) {
+        if (!g_replicator->applyEvent(event)) {
+            spdlog::error("Failed to apply replicated event: {} {}", evt_type, event.relative_path);
+        }
+    }
 }
 
 void onFilesystemEvent(const events::Event& event) {
@@ -62,7 +70,14 @@ void onFilesystemEvent(const events::Event& event) {
     }
 
     spdlog::info("[FS EVENT] {}: Item = {}", evt_type, event.relative_path);
-    g_raft_node.get()->proposeEvent(event);
+    
+    if (g_raft_node && g_raft_node->isLeader()) {
+        if (!g_raft_node->proposeEvent(event)) {
+            spdlog::warn("Failed to propose event to Raft cluster");
+        }
+    } else {
+        spdlog::debug("Not leader, skipping proposal for: {}", event.relative_path);
+    }
 }
 
 int main(int argc, char **argv) {
@@ -121,8 +136,16 @@ int main(int argc, char **argv) {
     
     spdlog::info("Filesystem watcher started");
 
+    g_replicator = std::make_unique<fs::Replicator>(watch_dir, g_watcher.get());
+    spdlog::info("File replicator initialized");
+
     while (g_running) {
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
+
+    if (g_replicator) {
+        g_replicator.reset();
+        spdlog::info("File replicator stopped");
     }
 
     if (g_watcher) {
