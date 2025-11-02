@@ -1,4 +1,3 @@
-
 #include "diarkis/state_machine.h"
 
 #include <braft/util.h>
@@ -19,7 +18,14 @@ void StateMachine::on_apply(braft::Iterator& iter) {
         }
         
         butil::IOBuf data = iter.data();
-        events::Event event = events::Event::deserialize(data.to_string().c_str());
+        std::string data_str = data.to_string();
+        
+        events::Event event = events::Event::deserialize(data_str.c_str(), data_str.size());
+        
+        if (event.type == events::EventType::INVALID) {
+            spdlog::error("Failed to deserialize event at index {}", iter.index());
+            continue;
+        }
         
         spdlog::info("Applying op at index {}: type={}, path={}", 
             iter.index(), static_cast<int>(event.type), event.path);

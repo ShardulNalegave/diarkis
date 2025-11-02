@@ -6,6 +6,7 @@
 #include <atomic>
 #include <braft/raft.h>
 #include <braft/util.h>
+#include <brpc/server.h>
 
 #include "diarkis/events.h"
 
@@ -21,7 +22,7 @@ namespace raft {
         bool init(const std::string& peers);
         void shutdown();
 
-        bool proposeEvent(events::Event& event);
+        bool proposeEvent(const events::Event& event);
 
         bool isLeader() const;
         std::string getLeaderAddr() const;
@@ -35,6 +36,7 @@ namespace raft {
 
         braft::Node* node;
         braft::StateMachine* state_machine;
+        brpc::Server* server;
 
         events::EventHandler apply_callback;
         std::atomic<bool> is_leader;

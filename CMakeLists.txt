@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.15)
 project(diarkis VERSION 0.1.0 LANGUAGES CXX)
 
 add_subdirectory(vendor/spdlog)
+add_subdirectory(vendor/CLI11)
 
 find_package(Threads REQUIRED)
 find_package(Protobuf REQUIRED)
@@ -37,6 +38,7 @@ add_executable(diarkis ${DIARKIS_SOURCES})
 target_link_libraries(diarkis
     PRIVATE
         spdlog::spdlog
+        CLI11::CLI11
         Threads::Threads
         ${BRAFT_LIBRARY}
         ${BRPC_LIBRARY}

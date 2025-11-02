@@ -1,4 +1,3 @@
-
 #include "diarkis/fs_watcher.h"
 
 #include <poll.h>
@@ -8,6 +7,8 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <chrono>
+#include <fstream>
+#include <sstream>
 
 #include <spdlog/spdlog.h>
 
@@ -16,6 +17,37 @@ namespace fs {
 static bool isDirectory(const std::string& path) {
     struct stat st;
     return (stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode));
+}
+
+static bool readFileContents(const std::string& path, std::string& contents) {
+    std::ifstream file(path, std::ios::binary);
+    if (!file) {
+        spdlog::warn("Failed to open file for reading: {}", path);
+        return false;
+    }
+    
+    file.seekg(0, std::ios::end);
+    std::streamsize size = file.tellg();
+    file.seekg(0, std::ios::beg);
+    
+    const std::streamsize MAX_FILE_SIZE = 10 * 1024 * 1024;
+    if (size > MAX_FILE_SIZE) {
+        spdlog::warn("File too large to read into memory ({}MB): {}", size / (1024*1024), path);
+        return false;
+    }
+    
+    if (size == 0) {
+        contents.clear();
+        return true;
+    }
+    
+    contents.resize(size);
+    if (!file.read(&contents[0], size)) {
+        spdlog::warn("Failed to read file contents: {}", path);
+        return false;
+    }
+    
+    return true;
 }
 
 static void listSubdirs(const std::string& path, std::vector<std::string>& dirs) {
@@ -244,6 +276,9 @@ void Watcher::handleEvent(const struct inotify_event* event) {
 
     if (event->mask & IN_CREATE) {
         file_event.type = events::EventType::CREATED;
+        if (!is_dir) {
+            readFileContents(full_path, file_event.contents);
+        }
         
         if (is_dir) {
             addWatch(full_path);
@@ -260,6 +295,9 @@ void Watcher::handleEvent(const struct inotify_event* event) {
         }
     } else if (event->mask & IN_MODIFY) {
         file_event.type = events::EventType::MODIFIED;
+        if (!is_dir) {
+            readFileContents(full_path, file_event.contents);
+        }
     } else if (event->mask & IN_MOVED_FROM) {
         std::lock_guard<std::mutex> lock(move_mutex);
         pending_moves[event->cookie] = {
@@ -280,6 +318,10 @@ void Watcher::handleEvent(const struct inotify_event* event) {
         } else {
             // file moved from outside observed dir tree to inside, treat it as create
             file_event.type = events::EventType::CREATED;
+            if (!is_dir) {
+                readFileContents(full_path, file_event.contents);
+            }
+            
             if (is_dir) {
                 addWatch(full_path);
             }

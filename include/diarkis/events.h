@@ -24,8 +24,8 @@ namespace events {
         std::string contents; // file contents, used only for CREATED/MODIFIED event types
 
         size_t getSerializedSize() const;
-        const char* serialize() const;
-        static Event deserialize(const char* bytes);
+        std::pair<const char*, size_t> serialize() const;
+        static Event deserialize(const char* bytes, size_t size);
     };
 
     using EventHandler = std::function<void(const Event&)>;

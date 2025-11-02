@@ -1,3 +1,4 @@
 .vscode/
 build/
-test_dir/
+watch*
+data*

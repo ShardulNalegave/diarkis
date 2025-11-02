@@ -1,4 +1,3 @@
-
 #include "diarkis/raft_node.h"
 #include "diarkis/state_machine.h"
 
@@ -9,7 +8,7 @@ namespace raft {
 
 Node::Node(int node_id_, const std::string& listen_addr_, const std::string& data_dir_)
     : node_id(node_id_), listen_addr(listen_addr_), data_dir(data_dir_),
-        node(nullptr), state_machine(nullptr), is_leader(false) {
+        node(nullptr), state_machine(nullptr), server(nullptr), is_leader(false) {
     if (data_dir[data_dir.length() - 1] != '/') {
         data_dir += '/';
     }
@@ -20,6 +19,25 @@ Node::~Node() {
 }
 
 bool Node::init(const std::string& peers) {
+    size_t colon_pos = listen_addr.find(':');
+    if (colon_pos == std::string::npos) {
+        spdlog::error("Invalid listen address format: {}", listen_addr);
+        return false;
+    }
+    int port = std::stoi(listen_addr.substr(colon_pos + 1));
+    
+    server = new brpc::Server();
+    braft::add_service(server, listen_addr.c_str());
+
+    if (server->Start(port, nullptr) != 0) {
+        spdlog::error("Failed to start brpc server on port {}", port);
+        delete server;
+        server = nullptr;
+        return false;
+    }
+
+    spdlog::info("brpc server started on port {}", port);
+
     state_machine = new StateMachine(&is_leader, &apply_callback);
 
     braft::NodeOptions node_options;
@@ -92,18 +110,25 @@ void Node::shutdown() {
         delete state_machine;
         state_machine = nullptr;
     }
+
+    if (server) {
+        server->Stop(0);
+        server->Join();
+        delete server;
+        server = nullptr;
+    }
 }
 
-bool Node::proposeEvent(events::Event& event) {
+bool Node::proposeEvent(const events::Event& event) {
     if (!isLeader()) {
-        spdlog::error("Not leader, cannot propose");
+        spdlog::warn("Not leader, cannot propose event");
         return false;
     }
     
-    const char* serialized = event.serialize();
+    auto [serialized, size] = event.serialize();
     
     butil::IOBuf buf;
-    buf.append(serialized);
+    buf.append(serialized, size);
     
     braft::Task task;
     task.data = &buf;
@@ -111,8 +136,8 @@ bool Node::proposeEvent(events::Event& event) {
     
     node->apply(task);
     
-    spdlog::debug("Proposed event: type={}, path={}", 
-        static_cast<int>(event.type), event.path);
+    spdlog::debug("Proposed event: type={}, path={}, size={} bytes", 
+        static_cast<int>(event.type), event.path, size);
     
     return true;
 }
