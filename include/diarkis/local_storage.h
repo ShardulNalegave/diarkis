@@ -3,6 +3,7 @@
 #define DIARKIS_LOCAL_STORAGE_H
 
 #include "diarkis/fs_operations.h"
+#include "diarkis/fs_client.h"
 #include <string>
 #include <vector>
 
@@ -14,47 +15,41 @@ namespace diarkis {
  * All operations are performed within a base directory.
  * Paths are relative to this base directory for safety.
  * 
- * Operations are designed to be idempotent where possible
- * (e.g., creating an existing file returns success).
+ * Operations are designed to be idempotent where possible.
  */
 class LocalStorageEngine {
 public:
-    /**
-     * Initialize storage engine
-     * @param base_path Base directory for all filesystem operations
-     */
     explicit LocalStorageEngine(std::string base_path);
 
     /**
      * Initialize the storage directory
-     * Creates base directory if it doesn't exist
-     * @return 0 on success, errno on failure
      */
     int initialize();
 
     /**
-     * Apply a filesystem operation
-     * This is called by the Raft state machine after consensus
-     * 
-     * @param op Operation to apply
-     * @return 0 on success, errno on failure
+     * Apply a filesystem operation (called after Raft consensus)
      */
     int apply_operation(const FSOperation& op);
 
     /**
-     * Read file contents (local operation, no consensus needed)
-     * @param path Relative path to file
-     * @param buffer Output buffer
-     * @return Number of bytes read on success, negative errno on failure
+     * Read file contents
      */
-    ssize_t read_file(const std::string& path, std::vector<uint8_t>& buffer);
+    Result<std::vector<uint8_t>> read_file(const std::string& path);
 
     /**
-     * List directory contents (local operation, no consensus needed)
-     * @param path Relative path to directory
-     * @return Vector of filenames, or empty vector on error
+     * List directory contents
      */
-    std::vector<std::string> list_directory(const std::string& path);
+    Result<std::vector<std::string>> list_directory(const std::string& path);
+
+    /**
+     * Get file/directory metadata
+     */
+    Result<FileInfo> stat(const std::string& path);
+
+    /**
+     * Check if path exists
+     */
+    Result<bool> exists(const std::string& path);
 
     const std::string& get_base_path() const { return base_path_; }
 

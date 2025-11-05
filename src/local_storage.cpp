@@ -1,7 +1,6 @@
 
 #include "diarkis/local_storage.h"
 #include <spdlog/spdlog.h>
-
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <fcntl.h>
@@ -9,12 +8,12 @@
 #include <dirent.h>
 #include <cerrno>
 #include <cstring>
+#include <ctime>
 
 namespace diarkis {
 
 LocalStorageEngine::LocalStorageEngine(std::string base_path)
     : base_path_(std::move(base_path)) {
-    // ensure base path doesn't end with '/'
     if (!base_path_.empty() && base_path_.back() == '/') {
         base_path_.pop_back();
     }
@@ -22,16 +21,15 @@ LocalStorageEngine::LocalStorageEngine(std::string base_path)
 
 int LocalStorageEngine::initialize() {
     struct stat st;
-    if (stat(base_path_.c_str(), &st) == 0) {
+    if (::stat(base_path_.c_str(), &st) == 0) {
         if (!S_ISDIR(st.st_mode)) {
             spdlog::error("Base path exists but is not a directory: {}", base_path_);
             return ENOTDIR;
         }
-        spdlog::info("Storage initialized at existing directory: {}", base_path_);
+        spdlog::info("Storage initialized at: {}", base_path_);
         return 0;
     }
 
-    // rwxr-xr-x permissions
     if (mkdir(base_path_.c_str(), 0755) != 0) {
         int err = errno;
         spdlog::error("Failed to create base directory {}: {}", base_path_, strerror(err));
@@ -43,7 +41,7 @@ int LocalStorageEngine::initialize() {
 }
 
 int LocalStorageEngine::apply_operation(const FSOperation& op) {
-    spdlog::debug("Applying operation: {}", op.to_string());
+    spdlog::debug("Applying: {}", op.to_string());
 
     int result = 0;
     switch (op.type) {
@@ -67,7 +65,6 @@ int LocalStorageEngine::apply_operation(const FSOperation& op) {
             break;
         case FSOperationType::RENAME:
             if (op.data.empty()) {
-                spdlog::error("RENAME operation missing new path");
                 result = EINVAL;
             } else {
                 std::string new_path(op.data.begin(), op.data.end());
@@ -75,67 +72,67 @@ int LocalStorageEngine::apply_operation(const FSOperation& op) {
             }
             break;
         default:
-            spdlog::error("Unknown operation type: {}", static_cast<int>(op.type));
             result = EINVAL;
     }
 
     if (result != 0) {
         spdlog::error("Operation failed: {}, error: {}", op.to_string(), strerror(result));
-    } else {
-        spdlog::debug("Operation succeeded: {}", op.to_string());
     }
-
     return result;
 }
 
-ssize_t LocalStorageEngine::read_file(const std::string& path, std::vector<uint8_t>& buffer) {
+Result<std::vector<uint8_t>> LocalStorageEngine::read_file(const std::string& path) {
     std::string full_path = get_full_path(path);
     
     int fd = open(full_path.c_str(), O_RDONLY);
     if (fd < 0) {
         int err = errno;
-        spdlog::error("Failed to open file for reading {}: {}", full_path, strerror(err));
-        return -err;
+        if (err == ENOENT) {
+            return Result<std::vector<uint8_t>>::Error(FSStatus::NOT_FOUND, 
+                "File not found: " + path);
+        }
+        return Result<std::vector<uint8_t>>::Error(FSStatus::IO_ERROR, strerror(err));
     }
 
     struct stat st;
     if (fstat(fd, &st) != 0) {
         int err = errno;
         close(fd);
-        spdlog::error("Failed to stat file {}: {}", full_path, strerror(err));
-        return -err;
+        return Result<std::vector<uint8_t>>::Error(FSStatus::IO_ERROR, strerror(err));
     }
 
-    buffer.resize(st.st_size);
+    std::vector<uint8_t> buffer(st.st_size);
     ssize_t total_read = 0;
     while (total_read < st.st_size) {
         ssize_t n = read(fd, buffer.data() + total_read, st.st_size - total_read);
         if (n < 0) {
             int err = errno;
             close(fd);
-            spdlog::error("Failed to read file {}: {}", full_path, strerror(err));
-            return -err;
+            return Result<std::vector<uint8_t>>::Error(FSStatus::IO_ERROR, strerror(err));
         }
-        if (n == 0) break;  // EOF
+        if (n == 0) break;
         total_read += n;
     }
 
     close(fd);
     spdlog::debug("Read {} bytes from {}", total_read, path);
-    return total_read;
+    return Result<std::vector<uint8_t>>::Ok(std::move(buffer));
 }
 
-std::vector<std::string> LocalStorageEngine::list_directory(const std::string& path) {
-    std::vector<std::string> entries;
+Result<std::vector<std::string>> LocalStorageEngine::list_directory(const std::string& path) {
     std::string full_path = get_full_path(path);
 
     DIR* dir = opendir(full_path.c_str());
     if (!dir) {
         int err = errno;
-        spdlog::error("Failed to open directory {}: {}", full_path, strerror(err));
-        return entries;
+        if (err == ENOENT) {
+            return Result<std::vector<std::string>>::Error(FSStatus::NOT_FOUND, 
+                "Directory not found: " + path);
+        }
+        return Result<std::vector<std::string>>::Error(FSStatus::IO_ERROR, strerror(err));
     }
 
+    std::vector<std::string> entries;
     struct dirent* entry;
     while ((entry = readdir(dir)) != nullptr) {
         std::string name = entry->d_name;
@@ -144,8 +141,33 @@ std::vector<std::string> LocalStorageEngine::list_directory(const std::string& p
     }
 
     closedir(dir);
-    spdlog::debug("Listed {} entries in {}", entries.size(), path);
-    return entries;
+    return Result<std::vector<std::string>>::Ok(std::move(entries));
+}
+
+Result<FileInfo> LocalStorageEngine::stat(const std::string& path) {
+    std::string full_path = get_full_path(path);
+    
+    struct stat st;
+    if (::stat(full_path.c_str(), &st) != 0) {
+        int err = errno;
+        if (err == ENOENT) {
+            return Result<FileInfo>::Error(FSStatus::NOT_FOUND, "Path not found: " + path);
+        }
+        return Result<FileInfo>::Error(FSStatus::IO_ERROR, strerror(err));
+    }
+
+    FileInfo info;
+    info.name = path.substr(path.find_last_of('/') + 1);
+    info.size = st.st_size;
+    info.is_directory = S_ISDIR(st.st_mode);
+    info.last_modified = st.st_mtime;
+
+    return Result<FileInfo>::Ok(std::move(info));
+}
+
+Result<bool> LocalStorageEngine::exists(const std::string& path) {
+    std::string full_path = get_full_path(path);
+    return Result<bool>::Ok(path_exists(full_path));
 }
 
 int LocalStorageEngine::do_create_file(const std::string& path) {
@@ -155,25 +177,22 @@ int LocalStorageEngine::do_create_file(const std::string& path) {
     
     if (fd >= 0) {
         close(fd);
-        spdlog::debug("Created file: {}", full_path);
         return 0;
     }
     
     if (errno == EEXIST) {
-        spdlog::debug("File already exists (idempotent): {}", full_path);
-        return 0;
+        return 0;  // Idempotent
     }
     
     return errno;
 }
 
-int LocalStorageEngine::do_write_file(const std::string& path, const std::vector<uint8_t>& data) {
+int LocalStorageEngine::do_write_file(const std::string& path, 
+                                      const std::vector<uint8_t>& data) {
     std::string full_path = get_full_path(path);
     
     int fd = open(full_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) {
-        return errno;
-    }
+    if (fd < 0) return errno;
     
     size_t total_written = 0;
     while (total_written < data.size()) {
@@ -193,17 +212,15 @@ int LocalStorageEngine::do_write_file(const std::string& path, const std::vector
     }
     
     close(fd);
-    spdlog::debug("Wrote {} bytes to {}", data.size(), full_path);
     return 0;
 }
 
-int LocalStorageEngine::do_append_file(const std::string& path, const std::vector<uint8_t>& data) {
+int LocalStorageEngine::do_append_file(const std::string& path, 
+                                       const std::vector<uint8_t>& data) {
     std::string full_path = get_full_path(path);
     
     int fd = open(full_path.c_str(), O_WRONLY | O_APPEND | O_CREAT, 0644);
-    if (fd < 0) {
-        return errno;
-    }
+    if (fd < 0) return errno;
     
     size_t total_written = 0;
     while (total_written < data.size()) {
@@ -223,7 +240,6 @@ int LocalStorageEngine::do_append_file(const std::string& path, const std::vecto
     }
     
     close(fd);
-    spdlog::debug("Appended {} bytes to {}", data.size(), full_path);
     return 0;
 }
 
@@ -231,13 +247,11 @@ int LocalStorageEngine::do_delete_file(const std::string& path) {
     std::string full_path = get_full_path(path);
     
     if (unlink(full_path.c_str()) == 0) {
-        spdlog::debug("Deleted file: {}", full_path);
         return 0;
     }
     
     if (errno == ENOENT) {
-        spdlog::debug("File already deleted (idempotent): {}", full_path);
-        return 0;
+        return 0;  // Idempotent
     }
     
     return errno;
@@ -247,13 +261,11 @@ int LocalStorageEngine::do_create_directory(const std::string& path) {
     std::string full_path = get_full_path(path);
     
     if (mkdir(full_path.c_str(), 0755) == 0) {
-        spdlog::debug("Created directory: {}", full_path);
         return 0;
     }
     
     if (errno == EEXIST) {
-        spdlog::debug("Directory already exists (idempotent): {}", full_path);
-        return 0;
+        return 0;  // Idempotent
     }
     
     return errno;
@@ -263,24 +275,22 @@ int LocalStorageEngine::do_delete_directory(const std::string& path) {
     std::string full_path = get_full_path(path);
     
     if (rmdir(full_path.c_str()) == 0) {
-        spdlog::debug("Deleted directory: {}", full_path);
         return 0;
     }
     
     if (errno == ENOENT) {
-        spdlog::debug("Directory already deleted (idempotent): {}", full_path);
-        return 0;
+        return 0;  // Idempotent
     }
     
     return errno;
 }
 
-int LocalStorageEngine::do_rename(const std::string& old_path, const std::string& new_path) {
+int LocalStorageEngine::do_rename(const std::string& old_path, 
+                                  const std::string& new_path) {
     std::string full_old = get_full_path(old_path);
     std::string full_new = get_full_path(new_path);
     
     if (rename(full_old.c_str(), full_new.c_str()) == 0) {
-        spdlog::debug("Renamed {} to {}", full_old, full_new);
         return 0;
     }
     
@@ -288,7 +298,6 @@ int LocalStorageEngine::do_rename(const std::string& old_path, const std::string
 }
 
 std::string LocalStorageEngine::get_full_path(const std::string& relative_path) const {
-    // remove leading slash if present
     std::string clean_path = relative_path;
     if (!clean_path.empty() && clean_path[0] == '/') {
         clean_path = clean_path.substr(1);
@@ -303,12 +312,12 @@ std::string LocalStorageEngine::get_full_path(const std::string& relative_path) 
 
 bool LocalStorageEngine::path_exists(const std::string& full_path) const {
     struct stat st;
-    return stat(full_path.c_str(), &st) == 0;
+    return ::stat(full_path.c_str(), &st) == 0;
 }
 
 bool LocalStorageEngine::is_directory(const std::string& full_path) const {
     struct stat st;
-    if (stat(full_path.c_str(), &st) != 0) {
+    if (::stat(full_path.c_str(), &st) != 0) {
         return false;
     }
     return S_ISDIR(st.st_mode);

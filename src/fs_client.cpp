@@ -2,7 +2,6 @@
 #include "diarkis/fs_client.h"
 #include "diarkis/raft_fs_service.h"
 #include <spdlog/spdlog.h>
-#include <errno.h>
 
 namespace diarkis {
 
@@ -14,15 +13,13 @@ Client::~Client() {
     shutdown();
 }
 
-int Client::init() {
-    // Parse peer ID
+Result<void> Client::init() {
     braft::PeerId peer_id;
     if (peer_id.parse(config_.peer_id) != 0) {
-        spdlog::error("Invalid peer_id format: {}", config_.peer_id);
-        return -1;
+        return Result<void>::Error(FSStatus::INVALID_PATH, 
+            "Invalid peer_id format: " + config_.peer_id);
     }
 
-    // Create service options
     RaftFilesystemService::Options options;
     options.data_path = config_.data_path;
     options.raft_path = config_.raft_path;
@@ -32,18 +29,16 @@ int Client::init() {
     options.election_timeout_ms = config_.election_timeout_ms;
     options.snapshot_interval = config_.snapshot_interval;
 
-    // Create and start service
     service_ = std::make_unique<RaftFilesystemService>(options);
-    int ret = service_->start();
+    auto result = service_->start();
     
-    if (ret != 0) {
-        spdlog::error("Failed to start filesystem service");
+    if (!result.ok()) {
         service_.reset();
-        return ret;
+        return result;
     }
 
     spdlog::info("Filesystem client initialized");
-    return 0;
+    return Result<void>::Ok();
 }
 
 void Client::shutdown() {
@@ -53,69 +48,79 @@ void Client::shutdown() {
     }
 }
 
-int Client::create_file(const std::string& path) {
-    if (!service_) return EINVAL;
+Result<void> Client::create_file(const std::string& path) {
+    if (!service_) return Result<void>::Error(FSStatus::IO_ERROR, "Service not initialized");
     return service_->create_file(path);
 }
 
-int Client::write_file(const std::string& path, const std::vector<uint8_t>& data) {
-    if (!service_) return EINVAL;
+Result<void> Client::write_file(const std::string& path, const std::vector<uint8_t>& data) {
+    if (!service_) return Result<void>::Error(FSStatus::IO_ERROR, "Service not initialized");
     return service_->write_file(path, data);
 }
 
-int Client::write_file(const std::string& path, const std::string& data) {
+Result<void> Client::write_file(const std::string& path, const std::string& data) {
     std::vector<uint8_t> buffer(data.begin(), data.end());
     return write_file(path, buffer);
 }
 
-int Client::append_file(const std::string& path, const std::vector<uint8_t>& data) {
-    if (!service_) return EINVAL;
+Result<void> Client::append_file(const std::string& path, const std::vector<uint8_t>& data) {
+    if (!service_) return Result<void>::Error(FSStatus::IO_ERROR, "Service not initialized");
     return service_->append_file(path, data);
 }
 
-int Client::append_file(const std::string& path, const std::string& data) {
+Result<void> Client::append_file(const std::string& path, const std::string& data) {
     std::vector<uint8_t> buffer(data.begin(), data.end());
     return append_file(path, buffer);
 }
 
-int Client::delete_file(const std::string& path) {
-    if (!service_) return EINVAL;
+Result<void> Client::delete_file(const std::string& path) {
+    if (!service_) return Result<void>::Error(FSStatus::IO_ERROR, "Service not initialized");
     return service_->delete_file(path);
 }
 
-int Client::create_directory(const std::string& path) {
-    if (!service_) return EINVAL;
+Result<void> Client::create_directory(const std::string& path) {
+    if (!service_) return Result<void>::Error(FSStatus::IO_ERROR, "Service not initialized");
     return service_->create_directory(path);
 }
 
-int Client::delete_directory(const std::string& path) {
-    if (!service_) return EINVAL;
+Result<void> Client::delete_directory(const std::string& path) {
+    if (!service_) return Result<void>::Error(FSStatus::IO_ERROR, "Service not initialized");
     return service_->delete_directory(path);
 }
 
-int Client::rename(const std::string& old_path, const std::string& new_path) {
-    if (!service_) return EINVAL;
+Result<void> Client::rename(const std::string& old_path, const std::string& new_path) {
+    if (!service_) return Result<void>::Error(FSStatus::IO_ERROR, "Service not initialized");
     return service_->rename(old_path, new_path);
 }
 
-ssize_t Client::read_file(const std::string& path, std::vector<uint8_t>& buffer) {
-    if (!service_) return -EINVAL;
-    return service_->read_file(path, buffer);
+Result<std::vector<uint8_t>> Client::read_file(const std::string& path) {
+    if (!service_) return Result<std::vector<uint8_t>>::Error(FSStatus::IO_ERROR, "Service not initialized");
+    return service_->read_file(path);
 }
 
-ssize_t Client::read_file(const std::string& path, std::string& content) {
-    if (!service_) return -EINVAL;
-    std::vector<uint8_t> buffer;
-    ssize_t ret = service_->read_file(path, buffer);
-    if (ret > 0) {
-        content.assign(buffer.begin(), buffer.end());
+Result<std::string> Client::read_file_string(const std::string& path) {
+    auto result = read_file(path);
+    if (!result.ok()) {
+        return Result<std::string>::Error(result.status, result.error_message);
     }
-    return ret;
+    
+    std::string content(result.value.begin(), result.value.end());
+    return Result<std::string>::Ok(std::move(content));
 }
 
-std::vector<std::string> Client::list_directory(const std::string& path) {
-    if (!service_) return {};
+Result<std::vector<std::string>> Client::list_directory(const std::string& path) {
+    if (!service_) return Result<std::vector<std::string>>::Error(FSStatus::IO_ERROR, "Service not initialized");
     return service_->list_directory(path);
+}
+
+Result<FileInfo> Client::stat(const std::string& path) {
+    if (!service_) return Result<FileInfo>::Error(FSStatus::IO_ERROR, "Service not initialized");
+    return service_->stat(path);
+}
+
+Result<bool> Client::exists(const std::string& path) {
+    if (!service_) return Result<bool>::Error(FSStatus::IO_ERROR, "Service not initialized");
+    return service_->exists(path);
 }
 
 bool Client::is_leader() const {

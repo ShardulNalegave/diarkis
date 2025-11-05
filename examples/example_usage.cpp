@@ -1,3 +1,4 @@
+
 #include "diarkis/fs_client.h"
 #include <spdlog/spdlog.h>
 #include <gflags/gflags.h>
@@ -9,38 +10,39 @@ DEFINE_string(data_path, "./data", "Base path for filesystem data");
 DEFINE_string(raft_path, "./raft", "Path for Raft metadata");
 DEFINE_string(group_id, "diarkis_fs", "Raft group ID");
 DEFINE_string(peer_id, "127.0.0.1:8100:0", "This peer's ID (ip:port:index)");
-DEFINE_string(conf, "127.0.0.1:8100:0,127.0.0.1:8101:0,127.0.0.1:8102:0", "Initial configuration");
+DEFINE_string(conf, "127.0.0.1:8100:0,127.0.0.1:8101:0,127.0.0.1:8102:0", 
+              "Initial cluster configuration");
 DEFINE_int32(election_timeout, 5000, "Election timeout in milliseconds");
 
 using namespace diarkis;
 
-bool is_valid_leader(const std::string& leader_str) {
-    // Check if leader string is empty or represents an invalid/uninitialized peer
-    return !leader_str.empty() && 
-           leader_str != "0.0.0.0:0:0:0" && 
-           leader_str.find("0.0.0.0") == std::string::npos;
-}
-
-void wait_for_leader(Client& client) {
+bool wait_for_leader(Client& client, int timeout_seconds = 30) {
     spdlog::info("Waiting for leader election...");
-    for (int i = 0; i < 60; ++i) {  // Increased timeout to 30 seconds
+    for (int i = 0; i < timeout_seconds * 2; ++i) {
         std::string leader = client.get_leader();
-        if (is_valid_leader(leader)) {
+        if (!leader.empty() && leader.find("0.0.0.0") == std::string::npos) {
             spdlog::info("Leader elected: {}", leader);
-            return;
+            return true;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(500));
     }
-    spdlog::warn("No leader elected within timeout");
+    spdlog::warn("No leader elected within {} seconds", timeout_seconds);
+    return false;
+}
+
+template<typename T>
+void print_result(const std::string& operation, const Result<T>& result) {
+    if (result.ok()) {
+        spdlog::info("✓ {}: SUCCESS", operation);
+    } else {
+        spdlog::error("✗ {}: FAILED - {}", operation, result.error_message);
+    }
 }
 
 int main(int argc, char* argv[]) {
     google::ParseCommandLineFlags(&argc, &argv, true);
-    
-    // Set log level
     spdlog::set_level(spdlog::level::info);
 
-    // Configure client
     Client::Config config;
     config.data_path = FLAGS_data_path;
     config.raft_path = FLAGS_raft_path;
@@ -49,109 +51,131 @@ int main(int argc, char* argv[]) {
     config.initial_conf = FLAGS_conf;
     config.election_timeout_ms = FLAGS_election_timeout;
 
-    // Initialize client
     Client client(config);
-    if (client.init() != 0) {
-        spdlog::error("Failed to initialize filesystem client");
+    
+    auto init_result = client.init();
+    if (!init_result.ok()) {
+        spdlog::error("Failed to initialize client: {}", init_result.error_message);
         return 1;
     }
 
-    // Wait for leader election
-    wait_for_leader(client);
+    if (!wait_for_leader(client)) {
+        return 1;
+    }
 
-    // Give some time for stabilization
     std::this_thread::sleep_for(std::chrono::seconds(2));
 
-    // Example operations
-    spdlog::info("Starting example operations...");
+    spdlog::info("");
+    spdlog::info("=== Starting Filesystem Operations ===");
+    spdlog::info("Node: {}", FLAGS_peer_id);
+    spdlog::info("Role: {}", client.is_leader() ? "LEADER" : "FOLLOWER");
+    spdlog::info("Leader: {}", client.get_leader());
+    spdlog::info("");
 
-    // Check if this node is the leader
+    // ==================== Write Operations (Leader Only) ====================
+    
     if (client.is_leader()) {
-        spdlog::info("This node is the LEADER, performing operations...");
+        spdlog::info("--- Write Operations (Leader) ---");
         
-        // Create a directory
-        int ret = client.create_directory("test_dir");
-        if (ret == 0) {
-            spdlog::info("✓ Created directory: test_dir");
-        } else {
-            spdlog::error("✗ Failed to create directory: {}", strerror(ret));
-        }
-
-        // Small delay to ensure replication
+        auto result = client.create_directory("projects");
+        print_result("Create directory 'projects'", result);
+        
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-        // Create a file
-        ret = client.create_file("test_dir/hello.txt");
-        if (ret == 0) {
-            spdlog::info("✓ Created file: test_dir/hello.txt");
-        } else {
-            spdlog::error("✗ Failed to create file: {}", strerror(ret));
-        }
-
-        // Small delay
+        result = client.create_file("projects/README.md");
+        print_result("Create file 'projects/README.md'", result);
+        
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-        // Write to file
-        std::string content = "Hello, replicated filesystem!";
-        ret = client.write_file("test_dir/hello.txt", content);
-        if (ret == 0) {
-            spdlog::info("✓ Wrote {} bytes to file: test_dir/hello.txt", content.size());
-        } else {
-            spdlog::error("✗ Failed to write file: {}", strerror(ret));
-        }
+        std::string readme_content = 
+            "# Distributed Filesystem\n\n"
+            "This is a replicated filesystem using Raft consensus.\n"
+            "All writes go through the leader and are replicated to followers.\n";
+        
+        result = client.write_file("projects/README.md", readme_content);
+        print_result("Write to 'projects/README.md'", result);
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
-        // Append to file
-        content = "Bye bye!";
-        ret = client.append_file("test_dir/hello.txt", content);
-        if (ret == 0) {
-            spdlog::info("✓ Appended {} bytes to file: test_dir/hello.txt", content.size());
-        } else {
-            spdlog::error("✗ Failed to append to file: {}", strerror(ret));
-        }
+        result = client.create_file("projects/status.txt");
+        print_result("Create file 'projects/status.txt'", result);
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+        result = client.write_file("projects/status.txt", "Initial status: Online\n");
+        print_result("Write to 'projects/status.txt'", result);
+        
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        
+        result = client.append_file("projects/status.txt", "Update: All systems operational\n");
+        print_result("Append to 'projects/status.txt'", result);
         
         spdlog::info("All write operations completed!");
+        spdlog::info("");
     } else {
-        spdlog::info("This node is a FOLLOWER");
-        spdlog::info("Current leader: {}", client.get_leader());
+        spdlog::info("--- Skipping Writes (Not Leader) ---");
+        spdlog::info("Only the leader can perform write operations");
+        spdlog::info("");
     }
 
-    // Wait a bit for replication to all nodes
+    // Wait for replication
     spdlog::info("Waiting for replication to complete...");
     std::this_thread::sleep_for(std::chrono::seconds(3));
+    
+    spdlog::info("--- Read Operations (Can run on any node) ---");
 
-    // Read file (can be done on any node)
-    spdlog::info("Reading file from local storage...");
-    std::string read_content;
-    ssize_t bytes = client.read_file("test_dir/hello.txt", read_content);
-    if (bytes > 0) {
-        spdlog::info("✓ Read {} bytes from file", bytes);
-        spdlog::info("  Content: \"{}\"", read_content);
-    } else if (bytes == -ENOENT) {
-        spdlog::warn("File not found (replication may still be in progress)");
-    } else {
-        spdlog::error("✗ Failed to read file: {}", strerror(-bytes));
-    }
-
-    // List directory
-    spdlog::info("Listing directory contents...");
-    auto entries = client.list_directory("test_dir");
-    if (!entries.empty()) {
-        spdlog::info("✓ Directory 'test_dir' contains {} entries:", entries.size());
-        for (const auto& entry : entries) {
+    auto list_result = client.list_directory("projects");
+    if (list_result.ok()) {
+        spdlog::info("✓ Directory 'projects' contains {} entries:", list_result.value.size());
+        for (const auto& entry : list_result.value) {
             spdlog::info("    - {}", entry);
         }
     } else {
-        spdlog::warn("Directory is empty or does not exist yet");
+        spdlog::error("✗ Failed to list directory: {}", list_result.error_message);
     }
 
-    // Keep running for a while to observe
     spdlog::info("");
-    spdlog::info("=== Filesystem is operational ===");
-    spdlog::info("Running for 60 seconds... Press Ctrl+C to exit early");
-    std::this_thread::sleep_for(std::chrono::seconds(60));
 
-    // Cleanup
-    spdlog::info("Shutting down...");
+    auto read_result = client.read_file_string("projects/README.md");
+    if (read_result.ok()) {
+        spdlog::info("✓ Read 'projects/README.md' ({} bytes)", read_result.value.size());
+        spdlog::info("Content preview:");
+        spdlog::info("---");
+        spdlog::info("{}", read_result.value);
+        spdlog::info("---");
+    } else {
+        spdlog::error("✗ Failed to read file: {}", read_result.error_message);
+    }
+
+    spdlog::info("");
+
+    read_result = client.read_file_string("projects/status.txt");
+    if (read_result.ok()) {
+        spdlog::info("✓ Read 'projects/status.txt' ({} bytes)", read_result.value.size());
+        spdlog::info("Content:");
+        spdlog::info("{}", read_result.value);
+    } else {
+        spdlog::error("✗ Failed to read file: {}", read_result.error_message);
+    }
+
+    spdlog::info("");
+
+    auto exists_result = client.exists("projects/README.md");
+    if (exists_result.ok()) {
+        spdlog::info("✓ File 'projects/README.md' exists: {}", 
+                     exists_result.value ? "YES" : "NO");
+    }
+
+    read_result = client.read_file_string("projects/missing.txt");
+    if (!read_result.ok()) {
+        spdlog::info("✓ Correctly detected missing file: {}", read_result.error_message);
+    }
+
+    spdlog::info("Press Ctrl+C to exit");
+    while (true) {
+        std::this_thread::sleep_for(std::chrono::seconds(10));
+    }
+
     client.shutdown();
     google::ShutDownCommandLineFlags();
     

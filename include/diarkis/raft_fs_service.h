@@ -4,10 +4,10 @@
 
 #include "diarkis/fs_operations.h"
 #include "diarkis/local_storage.h"
+#include "diarkis/fs_client.h"
 #include <braft/raft.h>
 #include <braft/storage.h>
 #include <braft/util.h>
-#include <braft/protobuf_file.h>
 #include <brpc/server.h>
 #include <bthread/bthread.h>
 #include <memory>
@@ -22,43 +22,45 @@ namespace diarkis {
  * 
  * This is the core state machine that integrates with braft.
  * All write operations go through Raft consensus before being applied.
- * Read operations are served locally without consensus.
+ * Read operations access the local replicas
  */
 class RaftFilesystemService : public braft::StateMachine {
 public:
     struct Options {
-        std::string data_path;          // Base path for filesystem data
-        std::string raft_path;          // Path for Raft metadata/logs
-        std::string group_id;           // Raft group identifier
-        braft::PeerId peer_id;          // This node's peer ID (ip:port:index)
-        std::string initial_conf;       // Initial cluster configuration
+        std::string data_path;
+        std::string raft_path;
+        std::string group_id;
+        braft::PeerId peer_id;
+        std::string initial_conf;
         int election_timeout_ms = 5000;
-        int snapshot_interval = 3600;   // Snapshot every N seconds
+        int snapshot_interval = 3600;
     };
 
     explicit RaftFilesystemService(const Options& options);
     ~RaftFilesystemService();
 
-    int start();
+    Result<void> start();
     void shutdown();
 
     bool is_leader() const;
     braft::PeerId get_leader() const;
 
     // Write operations (require consensus)
-    int create_file(const std::string& path);
-    int write_file(const std::string& path, const std::vector<uint8_t>& data);
-    int append_file(const std::string& path, const std::vector<uint8_t>& data);
-    int delete_file(const std::string& path);
-    int create_directory(const std::string& path);
-    int delete_directory(const std::string& path);
-    int rename(const std::string& old_path, const std::string& new_path);
+    Result<void> create_file(const std::string& path);
+    Result<void> write_file(const std::string& path, const std::vector<uint8_t>& data);
+    Result<void> append_file(const std::string& path, const std::vector<uint8_t>& data);
+    Result<void> delete_file(const std::string& path);
+    Result<void> create_directory(const std::string& path);
+    Result<void> delete_directory(const std::string& path);
+    Result<void> rename(const std::string& old_path, const std::string& new_path);
 
-    // Read operations (local, no consensus)
-    ssize_t read_file(const std::string& path, std::vector<uint8_t>& buffer);
-    std::vector<std::string> list_directory(const std::string& path);
+    // Read operations (from local replicas)
+    Result<std::vector<uint8_t>> read_file(const std::string& path);
+    Result<std::vector<std::string>> list_directory(const std::string& path);
+    Result<FileInfo> stat(const std::string& path);
+    Result<bool> exists(const std::string& path);
 
-    // braft::StateMachine interface implementation
+    // braft::StateMachine interface
     void on_apply(braft::Iterator& iter) override;
     void on_shutdown() override;
     void on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* done) override;
@@ -75,24 +77,22 @@ private:
     std::unique_ptr<LocalStorageEngine> storage_;
     std::unique_ptr<braft::Node> node_;
     std::unique_ptr<brpc::Server> server_;
+    
     std::atomic<bool> is_leader_;
     std::atomic<int64_t> leader_term_;
+    
     bthread_mutex_t mutex_;
 
-    // Submit an operation through Raft for consensus
-    int submit_operation(const FSOperation& op);
-
-    // Helper to redirect to leader if not leader
-    int redirect_error() const;
+    Result<void> submit_operation(const FSOperation& op);
+    static FSStatus errno_to_status(int err);
 };
 
 /**
- * Closure for async Raft operations
+ * Closure for Raft operations
  */
 class FSOperationClosure : public braft::Closure {
 public:
-    FSOperationClosure() : result(0), done(false) {}
-    
+    FSOperationClosure() : result_status(FSStatus::OK), done(false) {}
     ~FSOperationClosure() override = default;
 
     void Run() override {
@@ -111,8 +111,8 @@ public:
     std::mutex mutex;
     std::condition_variable cond;
     bool done;
-    int result;
-    butil::Status status_code;
+    FSStatus result_status;
+    std::string error_msg;
 };
 
 } // namespace diarkis
