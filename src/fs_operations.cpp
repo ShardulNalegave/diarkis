@@ -101,6 +101,7 @@ const char* FSOperation::op_type_to_string(FSOperationType type) {
     switch (type) {
         case FSOperationType::CREATE_FILE: return "CREATE_FILE";
         case FSOperationType::WRITE_FILE: return "WRITE_FILE";
+        case FSOperationType::APPEND_FILE: return "APPEND_FILE";
         case FSOperationType::DELETE_FILE: return "DELETE_FILE";
         case FSOperationType::CREATE_DIR: return "CREATE_DIR";
         case FSOperationType::DELETE_DIR: return "DELETE_DIR";

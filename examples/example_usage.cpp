@@ -99,6 +99,15 @@ int main(int argc, char* argv[]) {
         } else {
             spdlog::error("✗ Failed to write file: {}", strerror(ret));
         }
+
+        // Append to file
+        content = "Bye bye!";
+        ret = client.append_file("test_dir/hello.txt", content);
+        if (ret == 0) {
+            spdlog::info("✓ Appended {} bytes to file: test_dir/hello.txt", content.size());
+        } else {
+            spdlog::error("✗ Failed to append to file: {}", strerror(ret));
+        }
         
         spdlog::info("All write operations completed!");
     } else {
@@ -108,7 +117,7 @@ int main(int argc, char* argv[]) {
 
     // Wait a bit for replication to all nodes
     spdlog::info("Waiting for replication to complete...");
-    std::this_thread::sleep_for(std::chrono::seconds(2));
+    std::this_thread::sleep_for(std::chrono::seconds(3));
 
     // Read file (can be done on any node)
     spdlog::info("Reading file from local storage...");

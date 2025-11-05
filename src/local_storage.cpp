@@ -53,6 +53,9 @@ int LocalStorageEngine::apply_operation(const FSOperation& op) {
         case FSOperationType::WRITE_FILE:
             result = do_write_file(op.path, op.data);
             break;
+        case FSOperationType::APPEND_FILE:
+            result = do_append_file(op.path, op.data);
+            break;
         case FSOperationType::DELETE_FILE:
             result = do_delete_file(op.path);
             break;
@@ -191,6 +194,36 @@ int LocalStorageEngine::do_write_file(const std::string& path, const std::vector
     
     close(fd);
     spdlog::debug("Wrote {} bytes to {}", data.size(), full_path);
+    return 0;
+}
+
+int LocalStorageEngine::do_append_file(const std::string& path, const std::vector<uint8_t>& data) {
+    std::string full_path = get_full_path(path);
+    
+    int fd = open(full_path.c_str(), O_WRONLY | O_APPEND | O_CREAT, 0644);
+    if (fd < 0) {
+        return errno;
+    }
+    
+    size_t total_written = 0;
+    while (total_written < data.size()) {
+        ssize_t n = write(fd, data.data() + total_written, data.size() - total_written);
+        if (n < 0) {
+            int err = errno;
+            close(fd);
+            return err;
+        }
+        total_written += n;
+    }
+    
+    if (fsync(fd) != 0) {
+        int err = errno;
+        close(fd);
+        return err;
+    }
+    
+    close(fd);
+    spdlog::debug("Appended {} bytes to {}", data.size(), full_path);
     return 0;
 }
 

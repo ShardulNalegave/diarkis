@@ -159,6 +159,11 @@ int RaftFilesystemService::write_file(const std::string& path, const std::vector
     return submit_operation(op);
 }
 
+int RaftFilesystemService::append_file(const std::string& path, const std::vector<uint8_t>& data) {
+    FSOperation op(FSOperationType::APPEND_FILE, path, data);
+    return submit_operation(op);
+}
+
 int RaftFilesystemService::delete_file(const std::string& path) {
     FSOperation op(FSOperationType::DELETE_FILE, path);
     return submit_operation(op);

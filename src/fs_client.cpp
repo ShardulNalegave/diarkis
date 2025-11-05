@@ -68,6 +68,16 @@ int Client::write_file(const std::string& path, const std::string& data) {
     return write_file(path, buffer);
 }
 
+int Client::append_file(const std::string& path, const std::vector<uint8_t>& data) {
+    if (!service_) return EINVAL;
+    return service_->append_file(path, data);
+}
+
+int Client::append_file(const std::string& path, const std::string& data) {
+    std::vector<uint8_t> buffer(data.begin(), data.end());
+    return append_file(path, buffer);
+}
+
 int Client::delete_file(const std::string& path) {
     if (!service_) return EINVAL;
     return service_->delete_file(path);

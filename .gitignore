@@ -1,4 +1,3 @@
 .vscode/
 build/
-watch*
-data*
+run_cluster.sh

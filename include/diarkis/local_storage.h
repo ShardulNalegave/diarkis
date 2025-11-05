@@ -63,6 +63,7 @@ private:
 
     int do_create_file(const std::string& path);
     int do_write_file(const std::string& path, const std::vector<uint8_t>& data);
+    int do_append_file(const std::string& path, const std::vector<uint8_t>& data);
     int do_delete_file(const std::string& path);
     int do_create_directory(const std::string& path);
     int do_delete_directory(const std::string& path);

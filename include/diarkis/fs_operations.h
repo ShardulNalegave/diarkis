@@ -12,10 +12,11 @@ namespace diarkis {
 enum class FSOperationType : uint8_t {
     CREATE_FILE = 1,
     WRITE_FILE = 2,
-    DELETE_FILE = 3,
-    CREATE_DIR = 4,
-    DELETE_DIR = 5,
-    RENAME = 6
+    APPEND_FILE = 3,
+    DELETE_FILE = 4,
+    CREATE_DIR = 5,
+    DELETE_DIR = 6,
+    RENAME = 7
 };
 
 /**

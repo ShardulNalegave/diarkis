@@ -38,6 +38,8 @@ public:
     int create_file(const std::string& path);
     int write_file(const std::string& path, const std::vector<uint8_t>& data);
     int write_file(const std::string& path, const std::string& data);
+    int append_file(const std::string& path, const std::vector<uint8_t>& data);
+    int append_file(const std::string& path, const std::string& data);
     int delete_file(const std::string& path);
     int create_directory(const std::string& path);
     int delete_directory(const std::string& path);
