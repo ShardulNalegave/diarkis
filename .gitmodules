@@ -1,6 +1,0 @@
-[submodule "vendor/spdlog"]
-	path = vendor/spdlog
-	url = https://github.com/gabime/spdlog.git
-[submodule "vendor/CLI11"]
-	path = vendor/CLI11
-	url = https://github.com/CLIUtils/CLI11.git
