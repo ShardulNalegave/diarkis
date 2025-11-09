@@ -94,6 +94,86 @@ braft::PeerId StateMachine::get_leader() const {
     return node_->leader_id();
 }
 
+commands::Response StateMachine::apply_write_command(const commands::Command& cmd) {
+    commands::Response resp;
+    
+    if (!is_leader()) {
+        resp.success = false;
+        braft::PeerId leader = get_leader();
+        if (leader.is_empty()) {
+            resp.error = "No leader available";
+        } else {
+            resp.error = "Not leader, redirect to: " + leader.to_string();
+        }
+        return resp;
+    }
+    
+    msgpack::sbuffer sbuf;
+    msgpack::pack(sbuf, cmd);
+    
+    butil::IOBuf log_data;
+    log_data.append(sbuf.data(), sbuf.size());
+    
+    auto closure = std::make_unique<Closure>();
+    braft::Task task;
+    task.data = &log_data;
+    task.done = closure.get();
+    
+    node_->apply(task);
+    
+    closure->wait();
+    
+    if (closure->status().ok()) {
+        resp.success = true;
+    } else {
+        resp.success = false;
+        resp.error = closure->status().error_cstr();
+    }
+    
+    return resp;
+}
+
+commands::Response StateMachine::apply_read_command(const commands::Command& cmd) {
+    commands::Response resp;
+    
+    try {
+        switch (cmd.type) {
+            case commands::Type::READ_FILE: {
+                std::string mutable_path = cmd.path;
+                std::vector<uint8_t> buffer(10 * 1024 * 1024); // 10MB buffer
+                size_t bytes_read = storage_->read_file(mutable_path, buffer.data());
+                
+                if (bytes_read > 0) {
+                    resp.success = true;
+                    resp.data.assign(buffer.begin(), buffer.begin() + bytes_read);
+                } else {
+                    resp.success = false;
+                    resp.error = "File not found or read error";
+                }
+                break;
+            }
+            
+            case commands::Type::LIST_DIR: {
+                std::string mutable_path = cmd.path;
+                resp.entries = storage_->list_directory(mutable_path);
+                resp.success = true;
+                break;
+            }
+            
+            default:
+                resp.success = false;
+                resp.error = "Invalid read command type";
+                break;
+        }
+        
+    } catch (const std::exception& e) {
+        resp.success = false;
+        resp.error = std::string("Read error: ") + e.what();
+    }
+    
+    return resp;
+}
+
 void StateMachine::on_shutdown() {
     spdlog::info("State machine shutting down");
 }
@@ -132,15 +212,88 @@ void StateMachine::on_stop_following(const ::braft::LeaderChangeContext& ctx) {
 }
 
 void StateMachine::on_apply(braft::Iterator& iter) {
-    for (; iter.done(); iter.next()) {
-        auto data = iter.data().to_string();
-        msgpack::object_handle oh = msgpack::unpack(data.c_str(), data.size());
-        msgpack::object obj = oh.get();
+    for (; !iter.done(); iter.next()) {
+        braft::Closure* done = iter.done();
+        
+        try {
+            auto data = iter.data().to_string();
+            msgpack::object_handle oh = msgpack::unpack(data.c_str(), data.size());
+            msgpack::object obj = oh.get();
 
-        commands::Command cmd;
-        obj.convert(cmd);
+            commands::Command cmd;
+            obj.convert(cmd);
 
-        // TODO: Apply the command
+            spdlog::debug("Applying command type={} path={}", 
+                static_cast<int>(cmd.type), cmd.path);
+
+            int result = 0;
+            
+            switch (cmd.type) {
+                case commands::Type::CREATE_FILE:
+                    result = storage_->create_file(cmd.path);
+                    break;
+                    
+                case commands::Type::WRITE_FILE:
+                    result = storage_->write_file(cmd.path, 
+                        const_cast<uint8_t*>(cmd.contents.data()), 
+                        cmd.contents.size());
+                    break;
+                    
+                case commands::Type::APPEND_FILE:
+                    result = storage_->append_file(cmd.path, 
+                        const_cast<uint8_t*>(cmd.contents.data()), 
+                        cmd.contents.size());
+                    break;
+                    
+                case commands::Type::DELETE_FILE:
+                    result = storage_->delete_file(cmd.path);
+                    break;
+                    
+                case commands::Type::CREATE_DIR:
+                    result = storage_->create_directory(cmd.path);
+                    break;
+                    
+                case commands::Type::DELETE_DIR:
+                    result = storage_->delete_directory(cmd.path);
+                    break;
+                    
+                case commands::Type::RENAME:
+                    result = storage_->rename_file(cmd.path, cmd.new_path);
+                    break;
+                    
+                case commands::Type::READ_FILE:
+                case commands::Type::LIST_DIR:
+                    // These are read-only operations, shouldn't go through Raft
+                    spdlog::warn("Read-only command in apply: type={}", 
+                        static_cast<int>(cmd.type));
+                    break;
+                    
+                default:
+                    spdlog::error("Unknown command type in apply: {}", 
+                        static_cast<int>(cmd.type));
+                    if (done) {
+                        done->status().set_error(EINVAL, "Unknown command type");
+                    }
+                    break;
+            }
+            
+            if (done) {
+                if (result == 0) {
+                } else {
+                    done->status().set_error(result, strerror(result));
+                }
+            }
+            
+        } catch (const std::exception& e) {
+            spdlog::error("Exception applying command: {}", e.what());
+            if (done) {
+                done->status().set_error(EINVAL, e.what());
+            }
+        }
+        
+        if (done) {
+            done->Run();
+        }
     }
 }
 

@@ -9,6 +9,7 @@
 #include "braft/util.h"
 #include "brpc/server.h"
 #include "diarkis/storage.h"
+#include "diarkis/commands.h"
 
 namespace diarkis {
 
@@ -41,6 +42,9 @@ public:
     void on_configuration_committed(const ::braft::Configuration& conf) override;
     void on_start_following(const ::braft::LeaderChangeContext& ctx) override;
     void on_stop_following(const ::braft::LeaderChangeContext& ctx) override;
+
+    commands::Response apply_write_command(const commands::Command& cmd);
+    commands::Response apply_read_command(const commands::Command& cmd);
 
 private:
     Options options_;

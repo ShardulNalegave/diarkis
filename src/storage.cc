@@ -185,12 +185,11 @@ std::vector<std::string> Storage::list_directory(std::string& path) {
         return items;
     }
 
-    std::vector<std::string> entries;
     struct dirent* entry;
     while ((entry = readdir(dir)) != nullptr) {
         std::string name = entry->d_name;
         if (name == "." || name == "..") continue;
-        entries.push_back(name);
+        items.push_back(name);
     }
 
     closedir(dir);

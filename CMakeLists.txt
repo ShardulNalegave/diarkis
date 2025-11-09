@@ -7,9 +7,14 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(spdlog REQUIRED)
 find_package(msgpack-cxx REQUIRED)
+find_package(yaml-cpp REQUIRED)
+find_package(Threads REQUIRED)
+find_package(Protobuf REQUIRED)
+
 find_library(BRPC_LIB NAMES brpc)
 find_library(BRAFT_LIB NAMES braft)
 find_library(LEVELDB_LIB NAMES leveldb)
+find_library(GFLAGS_LIB NAMES gflags)
 
 if(NOT BRPC_LIB OR NOT BRAFT_LIB)
     message(FATAL_ERROR "braft and brpc libraries are required")
@@ -19,17 +24,23 @@ set(DIARKIS_SOURCES
     src/main.cc
     src/storage.cc
     src/state_machine.cc
+    src/tcp.cc
+    src/rpc.cc
+    src/config.cc
 )
 
-add_library(diarkis STATIC ${DIARKIS_SOURCES})
+add_executable(diarkis ${DIARKIS_SOURCES})
 
 target_link_libraries(diarkis
     PUBLIC 
-        msgpackc-cxx
+        msgpack-cxx
         spdlog::spdlog
+        yaml-cpp
+        Threads::Threads
         ${BRAFT_LIB}
         ${BRPC_LIB}
         ${PROTOBUF_LIBRARIES}
+        ${GFLAGS_LIB}
 )
 
 target_include_directories(diarkis
