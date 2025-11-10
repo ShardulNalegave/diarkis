@@ -1,3 +1,5 @@
 .vscode/
 build/
-run_cluster.sh
+node*.yaml
+data/
+raft/

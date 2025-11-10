@@ -34,8 +34,11 @@ public:
     bool is_leader() const;
     braft::PeerId get_leader() const;
 
+    // bRaft callbacks
     void on_apply(braft::Iterator& iter) override;
     void on_shutdown() override;
+    void on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* done) override;
+    int on_snapshot_load(braft::SnapshotReader* reader) override;
     void on_leader_start(int64_t term) override;
     void on_leader_stop(const butil::Status& status) override;
     void on_error(const ::braft::Error& e) override;
@@ -57,25 +60,26 @@ private:
 
 class Closure : public braft::Closure {
 public:
-    Closure() : done(false) {}
+    Closure() : done_(false) {}
     ~Closure() override = default;
 
     void Run() override {
-        std::unique_lock<std::mutex> lock(mutex);
-        done = true;
-        cond.notify_one();
+        std::unique_lock<std::mutex> lock(mutex_);
+        done_ = true;
+        cond_.notify_one();
     }
 
     void wait() {
-        std::unique_lock<std::mutex> lock(mutex);
-        while (!done) {
-            cond.wait(lock);
+        std::unique_lock<std::mutex> lock(mutex_);
+        while (!done_) {
+            cond_.wait(lock);
         }
     }
 
-    std::mutex mutex;
-    std::condition_variable cond;
-    bool done;
+private:
+    std::mutex mutex_;
+    std::condition_variable cond_;
+    bool done_;
 };
 
 }

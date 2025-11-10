@@ -20,6 +20,10 @@ if(NOT BRPC_LIB OR NOT BRAFT_LIB)
     message(FATAL_ERROR "braft and brpc libraries are required")
 endif()
 
+add_subdirectory(commands)
+add_subdirectory(client/cpp)
+add_subdirectory(examples)
+
 set(DIARKIS_SOURCES
     src/main.cc
     src/storage.cc
@@ -32,7 +36,9 @@ set(DIARKIS_SOURCES
 add_executable(diarkis ${DIARKIS_SOURCES})
 
 target_link_libraries(diarkis
-    PUBLIC 
+    PUBLIC
+        diarkis_commands
+
         msgpack-cxx
         spdlog::spdlog
         yaml-cpp

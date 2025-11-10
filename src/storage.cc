@@ -34,7 +34,7 @@ int Storage::init() {
     return 0;
 }
 
-int Storage::create_file(std::string& path) {
+int Storage::create_file(const std::string& path) {
     std::string full_path = get_full_path(path);
     
     int fd = open(full_path.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0644);
@@ -51,7 +51,7 @@ int Storage::create_file(std::string& path) {
     return errno;
 }
 
-int Storage::create_directory(std::string& path) {
+int Storage::create_directory(const std::string& path) {
     std::string full_path = get_full_path(path);
     
     if (mkdir(full_path.c_str(), 0755) == 0) {
@@ -65,7 +65,7 @@ int Storage::create_directory(std::string& path) {
     return errno;
 }
 
-size_t Storage::read_file(std::string& path, uint8_t* buffer) {
+size_t Storage::read_file(const std::string& path, uint8_t* buffer) {
     std::string full_path = get_full_path(path);
     
     int fd = open(full_path.c_str(), O_RDONLY);
@@ -105,7 +105,7 @@ size_t Storage::read_file(std::string& path, uint8_t* buffer) {
     return total_read;
 }
 
-int Storage::write_file(std::string& path, uint8_t* buffer, size_t size) {
+int Storage::write_file(const std::string& path, uint8_t* buffer, size_t size) {
     std::string full_path = get_full_path(path);
     
     int fd = open(full_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -132,7 +132,7 @@ int Storage::write_file(std::string& path, uint8_t* buffer, size_t size) {
     return 0;
 }
 
-int Storage::append_file(std::string& path, uint8_t* buffer, size_t size) {
+int Storage::append_file(const std::string& path, uint8_t* buffer, size_t size) {
     std::string full_path = get_full_path(path);
     
     int fd = open(full_path.c_str(), O_WRONLY | O_APPEND | O_CREAT, 0644);
@@ -159,7 +159,7 @@ int Storage::append_file(std::string& path, uint8_t* buffer, size_t size) {
     return 0;
 }
 
-int Storage::rename_file(std::string& old_path, std::string& new_path) {
+int Storage::rename_file(const std::string& old_path, const std::string& new_path) {
     std::string full_old = get_full_path(old_path);
     std::string full_new = get_full_path(new_path);
     
@@ -170,7 +170,7 @@ int Storage::rename_file(std::string& old_path, std::string& new_path) {
     return errno;
 }
 
-std::vector<std::string> Storage::list_directory(std::string& path) {
+std::vector<std::string> Storage::list_directory(const std::string& path) {
     std::string full_path = get_full_path(path);
     std::vector<std::string> items;
 
@@ -196,7 +196,7 @@ std::vector<std::string> Storage::list_directory(std::string& path) {
     return items;
 }
 
-int Storage::delete_file(std::string& path) {
+int Storage::delete_file(const std::string& path) {
     std::string full_path = get_full_path(path);
     
     if (unlink(full_path.c_str()) == 0) {
@@ -210,7 +210,7 @@ int Storage::delete_file(std::string& path) {
     return errno;
 }
 
-int Storage::delete_directory(std::string& path) {
+int Storage::delete_directory(const std::string& path) {
     std::string full_path = get_full_path(path);
     
     if (rmdir(full_path.c_str()) == 0) {

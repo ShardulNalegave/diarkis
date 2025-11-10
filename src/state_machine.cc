@@ -61,7 +61,7 @@ int StateMachine::init() {
 
     node_ = std::make_unique<braft::Node>(options_.group_id, options_.peer_id);
     if (node_->init(node_options) != 0) {
-        spdlog::error("StateMachine::init() : Failed to initialize Raft node", options_.initial_conf);
+        spdlog::error("StateMachine::init() : Failed to initialize Raft node");
         return -1;
     }
 
@@ -108,26 +108,31 @@ commands::Response StateMachine::apply_write_command(const commands::Command& cm
         return resp;
     }
     
-    msgpack::sbuffer sbuf;
-    msgpack::pack(sbuf, cmd);
-    
-    butil::IOBuf log_data;
-    log_data.append(sbuf.data(), sbuf.size());
-    
-    auto closure = std::make_unique<Closure>();
-    braft::Task task;
-    task.data = &log_data;
-    task.done = closure.get();
-    
-    node_->apply(task);
-    
-    closure->wait();
-    
-    if (closure->status().ok()) {
-        resp.success = true;
-    } else {
+    try {
+        msgpack::sbuffer sbuf;
+        msgpack::pack(sbuf, cmd);
+        
+        butil::IOBuf log_data;
+        log_data.append(sbuf.data(), sbuf.size());
+        
+        auto* closure = new Closure();
+        braft::Task task;
+        task.data = &log_data;
+        task.done = closure;
+        
+        node_->apply(task);
+        closure->wait();
+        
+        if (closure->status().ok()) {
+            resp.success = true;
+        } else {
+            resp.success = false;
+            resp.error = closure->status().error_cstr();
+        }
+        
+    } catch (const std::exception& e) {
         resp.success = false;
-        resp.error = closure->status().error_cstr();
+        resp.error = std::string("Exception: ") + e.what();
     }
     
     return resp;
@@ -139,9 +144,9 @@ commands::Response StateMachine::apply_read_command(const commands::Command& cmd
     try {
         switch (cmd.type) {
             case commands::Type::READ_FILE: {
-                std::string mutable_path = cmd.path;
                 std::vector<uint8_t> buffer(10 * 1024 * 1024); // 10MB buffer
-                size_t bytes_read = storage_->read_file(mutable_path, buffer.data());
+                std::string path_copy = cmd.path;
+                size_t bytes_read = storage_->read_file(path_copy, buffer.data());
                 
                 if (bytes_read > 0) {
                     resp.success = true;
@@ -154,8 +159,8 @@ commands::Response StateMachine::apply_read_command(const commands::Command& cmd
             }
             
             case commands::Type::LIST_DIR: {
-                std::string mutable_path = cmd.path;
-                resp.entries = storage_->list_directory(mutable_path);
+                std::string path_copy = cmd.path;
+                resp.entries = storage_->list_directory(path_copy);
                 resp.success = true;
                 break;
             }
@@ -212,11 +217,14 @@ void StateMachine::on_stop_following(const ::braft::LeaderChangeContext& ctx) {
 }
 
 void StateMachine::on_apply(braft::Iterator& iter) {
-    for (; !iter.done(); iter.next()) {
-        braft::Closure* done = iter.done();
+    for (; iter.valid(); iter.next()) {
+        braft::AsyncClosureGuard closure_guard(iter.done());
+        Closure* done = dynamic_cast<Closure*>(iter.done());
         
         try {
-            auto data = iter.data().to_string();
+            std::string data = iter.data().to_string();
+            spdlog::debug("on_apply: Processing log entry, data size={}", data.size());
+            
             msgpack::object_handle oh = msgpack::unpack(data.c_str(), data.size());
             msgpack::object obj = oh.get();
 
@@ -228,37 +236,50 @@ void StateMachine::on_apply(braft::Iterator& iter) {
 
             int result = 0;
             
+            std::string path_copy = cmd.path;
+            std::string new_path_copy = cmd.new_path;
+            
+            std::vector<uint8_t> contents_copy = cmd.contents;
+            
             switch (cmd.type) {
                 case commands::Type::CREATE_FILE:
-                    result = storage_->create_file(cmd.path);
+                    result = storage_->create_file(path_copy);
                     break;
                     
                 case commands::Type::WRITE_FILE:
-                    result = storage_->write_file(cmd.path, 
-                        const_cast<uint8_t*>(cmd.contents.data()), 
-                        cmd.contents.size());
+                    if (!contents_copy.empty()) {
+                        result = storage_->write_file(path_copy, 
+                            contents_copy.data(), 
+                            contents_copy.size());
+                    } else {
+                        result = storage_->write_file(path_copy, nullptr, 0);
+                    }
                     break;
                     
                 case commands::Type::APPEND_FILE:
-                    result = storage_->append_file(cmd.path, 
-                        const_cast<uint8_t*>(cmd.contents.data()), 
-                        cmd.contents.size());
+                    if (!contents_copy.empty()) {
+                        result = storage_->append_file(path_copy, 
+                            contents_copy.data(), 
+                            contents_copy.size());
+                    } else {
+                        result = storage_->append_file(path_copy, nullptr, 0);
+                    }
                     break;
                     
                 case commands::Type::DELETE_FILE:
-                    result = storage_->delete_file(cmd.path);
+                    result = storage_->delete_file(path_copy);
                     break;
                     
                 case commands::Type::CREATE_DIR:
-                    result = storage_->create_directory(cmd.path);
+                    result = storage_->create_directory(path_copy);
                     break;
                     
                 case commands::Type::DELETE_DIR:
-                    result = storage_->delete_directory(cmd.path);
+                    result = storage_->delete_directory(path_copy);
                     break;
                     
                 case commands::Type::RENAME:
-                    result = storage_->rename_file(cmd.path, cmd.new_path);
+                    result = storage_->rename_file(path_copy, new_path_copy);
                     break;
                     
                 case commands::Type::READ_FILE:
@@ -279,22 +300,42 @@ void StateMachine::on_apply(braft::Iterator& iter) {
             
             if (done) {
                 if (result == 0) {
+                    spdlog::debug("Command applied successfully");
                 } else {
                     done->status().set_error(result, strerror(result));
+                    spdlog::error("Command failed with error: {}", strerror(result));
                 }
             }
             
+        } catch (const msgpack::unpack_error& e) {
+            spdlog::error("MessagePack unpack error: {}", e.what());
+            if (done) {
+                done->status().set_error(EINVAL, "Deserialization error");
+            }
+        } catch (const msgpack::type_error& e) {
+            spdlog::error("MessagePack type error: {}", e.what());
+            if (done) {
+                done->status().set_error(EINVAL, "Type conversion error");
+            }
         } catch (const std::exception& e) {
             spdlog::error("Exception applying command: {}", e.what());
             if (done) {
                 done->status().set_error(EINVAL, e.what());
             }
         }
-        
-        if (done) {
-            done->Run();
-        }
     }
+}
+
+void StateMachine::on_snapshot_save(braft::SnapshotWriter* writer, braft::Closure* done) {
+    spdlog::info("Saving snapshot...");
+    // TODO: Implement actual snapshot saving
+    done->Run();
+}
+
+int StateMachine::on_snapshot_load(braft::SnapshotReader* reader) {
+    spdlog::info("Loading snapshot...");
+    // TODO: Implement actual snapshot loading
+    return 0;
 }
 
 }
