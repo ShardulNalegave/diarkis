@@ -1,179 +1,132 @@
-# Diarkis Distributed Filesystem
-A replicated filesystem library built on Raft consensus using `braft`. This library provides strong consistency guarantees for file operations across a distributed cluster.
+# Diarkis Replicated Filesystem
+A distributed, replicated filesystem built with Raft consensus in C++. Diarkis provides strong consistency guarantees for file operations across multiple nodes, ensuring data durability and high availability.
 
 ## Features
-- **Leader-based writes**: All write operations (create, write, append, delete) go through the elected leader and are replicated via Raft consensus
-- **Local reads**: Read operations can be performed on any node using local replicas
-- **Strong consistency**: Reads see all writes committed before them (linearizable reads)
-- **Automatic failover**: If the leader fails, a new leader is automatically elected
-- **Path-based API**: Simple, intuitive API similar to POSIX filesystem operations
+- **Raft Consensus**: Built on bRaft for leader election and log replication
+- **Strong Consistency**: All write operations go through consensus
+- **TCP-based RPC**: MessagePack protocol for efficient client-server communication
+- **File Operations**: Create, read, write, append, delete files and directories
 
-### How it works
+## Architecture
+Diarkis consists of two main components:
 
-1. **Write operations** (create, write, delete, etc.):
-   - Must be submitted to the leader node
-   - Leader proposes the operation through Raft
-   - Once a majority commits, the operation is applied
-   - Operation is then replicated to all followers
+- **Server**: Handles Raft consensus, state machine operations, and RPC requests
+- **Client Library**: Provides a simple C++ API for filesystem operations
 
-2. **Read operations** (read, list, stat):
-   - Can be performed on any node
-   - Served from local storage (no network overhead)
+## Prerequisites
+- C++17 compatible compiler
+- CMake 3.10+
+- bRaft
+- brpc
+- gflags
+- spdlog
+- yaml-cpp
+- msgpack-c
 
 ## Building
 
-### Dependencies
-
-- C++17 compiler
-- CMake 3.15+
-- bRaft
-- Apache brpc
-- spdlog
-- gflags
-- protobuf
-- leveldb
-
-### Build instructions
+### Server
 
 ```bash
 mkdir build && cd build
 cmake ..
-cmake --build .
+make
 ```
 
-## Usage
+### Client Library Integration
+Add to your `CMakeLists.txt`:
 
-### Starting the demo cluster
+```cmake
+add_subdirectory(client/cpp)
+target_link_libraries(your_target diarkis_client)
+```
 
-To run a 3-node cluster on localhost:
+## Running the Server
+Create a configuration file `config.yaml`:
 
-**Terminal 1 (Node 1):**
+```yaml
+storage:
+  base_path: "./data"
+
+raft:
+  path: "./raft"
+  group_id: "diarkis_fs"
+  peer_addr: "127.0.0.1:8100"
+  initial_conf: "127.0.0.1:8100"
+  election_timeout_ms: 5000
+  snapshot_interval: 3600
+
+rpc:
+  addr: "0.0.0.0"
+  port: 9100
+```
+
+Start the server:
+
 ```bash
-./fs_example \
-  --peer_id=127.0.0.1:8100:0 \
-  --conf=127.0.0.1:8100:0,127.0.0.1:8101:0,127.0.0.1:8102:0 \
-  --data_path=./data1 \
-  --raft_path=./raft1
+./diarkis_server --config=config.yaml
 ```
 
-**Terminal 2 (Node 2):**
-```bash
-./fs_example \
-  --peer_id=127.0.0.1:8101:0 \
-  --conf=127.0.0.1:8100:0,127.0.0.1:8101:0,127.0.0.1:8102:0 \
-  --data_path=./data2 \
-  --raft_path=./raft2
-```
-
-**Terminal 3 (Node 3):**
-```bash
-./fs_example \
-  --peer_id=127.0.0.1:8102:0 \
-  --conf=127.0.0.1:8100:0,127.0.0.1:8101:0,127.0.0.1:8102:0 \
-  --data_path=./data3 \
-  --raft_path=./raft3
-```
-
-### API Example
+## Client Usage Example
 
 ```cpp
-#include "diarkis/fs_client.h"
-
-using namespace diarkis;
+#include "diarkis_client/client.h"
+#include <iostream>
 
 int main() {
-    Client::Config config;
-    config.data_path = "./data";
-    config.raft_path = "./raft";
-    config.group_id = "my_fs";
-    config.peer_id = "127.0.0.1:8100:0";
-    config.initial_conf = "127.0.0.1:8100:0,127.0.0.1:8101:0,127.0.0.1:8102:0";
+    // Connect to server
+    diarkis_client::Client client("127.0.0.1", 9100);
     
-    Client client(config);
-    auto result = client.init();
-    if (!result.ok()) {
-        return 1;
+    // Create a file
+    std::string path = "test.txt";
+    if (client.create_file(path) == 0) {
+        std::cout << "File created successfully\n";
     }
     
-    // Write operations (must be leader)
-    if (client.is_leader()) {
-        client.create_directory("docs");
-        client.write_file("docs/hello.txt", "Hello, World!");
-        client.append_file("docs/hello.txt", "\nGoodbye!");
+    // Write data
+    std::string data = "Hello, Diarkis!";
+    if (client.write_file(path, reinterpret_cast<uint8_t*>(data.data()), data.size()) == 0) {
+        std::cout << "Data written successfully\n";
     }
     
-    // Read operations (any node)
-    auto content = client.read_file_string("docs/hello.txt");
-    if (content.ok()) {
-        std::cout << content.value << std::endl;
+    // Read data
+    uint8_t buffer[1024];
+    size_t bytes_read = client.read_file(path, buffer);
+    std::cout << "Read " << bytes_read << " bytes\n";
+    
+    // List directory
+    std::string dir_path = "/";
+    auto entries = client.list_directory(dir_path);
+    for (const auto& entry : entries) {
+        std::cout << entry << "\n";
     }
     
-    auto entries = client.list_directory("docs");
-    if (entries.ok()) {
-        for (const auto& entry : entries.value) {
-            std::cout << entry << std::endl;
-        }
-    }
-    
-    client.shutdown();
     return 0;
 }
 ```
 
-## API Reference
+## Configuration Options
 
-### Write Operations
+### Command Line Flags
 
-These operations require the node to be the leader. They return `Result<void>` with status:
+All configuration options can be overridden via command line:
 
-- `create_file(path)` - Create a new file (idempotent)
-- `write_file(path, data)` - Write data to file, overwriting existing content
-- `append_file(path, data)` - Append data to file
-- `delete_file(path)` - Delete a file (idempotent)
-- `create_directory(path)` - Create a directory (idempotent)
-- `delete_directory(path)` - Delete an empty directory
-- `rename(old_path, new_path)` - Rename/move a file or directory
-
-### Read Operations
-
-These operations can be performed on any node:
-
-- `read_file(path)` → `Result<vector<uint8_t>>` - Read file contents as bytes
-- `read_file_string(path)` → `Result<string>` - Read file contents as string
-- `list_directory(path)` → `Result<vector<string>>` - List directory entries
-- `stat(path)` → `Result<FileInfo>` - Get file/directory metadata
-- `exists(path)` → `Result<bool>` - Check if path exists
-
-### Status Operations
-
-- `is_leader()` → `bool` - Check if this node is the leader
-- `get_leader()` → `string` - Get the current leader's peer ID
-- `get_commit_index()` → `int64_t` - Get current commit index
-
-### Result Type
-
-All operations return a `Result<T>` type:
-
-```cpp
-Result<T> result = client.some_operation();
-
-if (result.ok()) {
-    // Success - use result.value
-    auto value = result.value;
-} else {
-    // Error - check result.status and result.error_message
-    std::cerr << "Error: " << result.error_message << std::endl;
-}
+```bash
+./diarkis_server \
+  --base_path=./data \
+  --raft_path=./raft \
+  --peer_addr=127.0.0.1:8100 \
+  --rpc_port=9100 \
+  --log_level=debug
 ```
 
-Status codes: `OK`, `NOT_FOUND`, `ALREADY_EXISTS`, `NOT_LEADER`, `NO_LEADER`, `IO_ERROR`, `INVALID_PATH`, `NOT_DIRECTORY`, `DIRECTORY_NOT_EMPTY`, `RAFT_ERROR`
+## Protocol
+Diarkis uses a simple length-prefixed MessagePack protocol:
+```
+[4 bytes length (network order)][msgpack data]
+```
 
-### Read consistency
-
-Followers serve reads from local storage but check their commit index. This provides:
-- **Low latency**: No network round-trip for reads
-- **Strong consistency**: Reads see committed writes
-- **High availability**: Reads work even if leader is unavailable
+All commands are serialized using MessagePack and sent over TCP connections.
 
 ## License
 This project is licensed under the MIT License.

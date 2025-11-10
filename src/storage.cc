@@ -1,253 +1,320 @@
 
 #include "diarkis/storage.h"
 #include "spdlog/spdlog.h"
-#include "sys/stat.h"
-#include "sys/types.h"
-#include "fcntl.h"
-#include "unistd.h"
-#include "dirent.h"
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <cerrno>
+#include <cstring>
 
 namespace diarkis {
 
+namespace {
+    constexpr off_t MAX_FILE_SIZE = 100 * 1024 * 1024; // 100MB
+    constexpr mode_t FILE_MODE = 0644;
+    constexpr mode_t DIR_MODE = 0755;
+    
+    class FileDescriptor {
+    public:
+        explicit FileDescriptor(int fd) : fd_(fd) {}
+        ~FileDescriptor() { if (fd_ >= 0) ::close(fd_); }
+        
+        FileDescriptor(const FileDescriptor&) = delete;
+        FileDescriptor& operator=(const FileDescriptor&) = delete;
+        
+        int get() const { return fd_; }
+        bool valid() const { return fd_ >= 0; }
+        int release() { int fd = fd_; fd_ = -1; return fd; }
+        
+    private:
+        int fd_;
+    };
+}
+
 Storage::Storage(std::string base_path) : base_path_(std::move(base_path)) {
-    if (!base_path_.empty() && base_path_.back() == '/') {
+    while (!base_path_.empty() && base_path_.back() == '/') {
         base_path_.pop_back();
     }
 }
 
-int Storage::init() {
+Result<void> Storage::init() {
     struct stat st;
     if (::stat(base_path_.c_str(), &st) == 0) {
         if (!S_ISDIR(st.st_mode)) {
             spdlog::error("Base path exists but is not a directory: {}", base_path_);
-            return ENOTDIR;
+            return Error(ErrorCode::NotDirectory, "Base path is not a directory");
         }
-    } else {
-        if (mkdir(base_path_.c_str(), 0755) != 0) {
-            int err = errno;
-            spdlog::error("Failed to create base directory {}: {}", base_path_, strerror(err));
-            return err;
-        }
-    }
-
-    spdlog::info("Storage initialized at base directory: {}", base_path_);
-    return 0;
-}
-
-int Storage::create_file(const std::string& path) {
-    std::string full_path = get_full_path(path);
-    
-    int fd = open(full_path.c_str(), O_CREAT | O_EXCL | O_WRONLY, 0644);
-    
-    if (fd >= 0) {
-        close(fd);
-        return 0;
+        spdlog::info("Storage initialized at existing directory: {}", base_path_);
+        return Result<void>();
     }
     
-    if (errno == EEXIST) {
-        return 0;
-    }
-    
-    return errno;
-}
-
-int Storage::create_directory(const std::string& path) {
-    std::string full_path = get_full_path(path);
-    
-    if (mkdir(full_path.c_str(), 0755) == 0) {
-        return 0;
-    }
-    
-    if (errno == EEXIST) {
-        return 0;
-    }
-    
-    return errno;
-}
-
-size_t Storage::read_file(const std::string& path, uint8_t* buffer) {
-    std::string full_path = get_full_path(path);
-    
-    int fd = open(full_path.c_str(), O_RDONLY);
-    if (fd < 0) {
+    if (::mkdir(base_path_.c_str(), DIR_MODE) != 0) {
         int err = errno;
-        if (err == ENOENT) {
-            spdlog::error("read_file: File not found (Path = {})", path);
-            return 0;
-        }
-        spdlog::error("read_file: IO Error (Path = {})\n\t{}", path, strerror(errno));
-        return 0;
+        spdlog::error("Failed to create base directory {}: {}", base_path_, std::strerror(err));
+        return Error::from_errno(err);
     }
+    
+    spdlog::info("Storage initialized at new directory: {}", base_path_);
+    return Result<void>();
+}
 
+std::string Storage::resolve_path(const std::string& relative_path) const {
+    std::string clean = relative_path;
+    
+    while (!clean.empty() && clean[0] == '/') {
+        clean = clean.substr(1);
+    }
+    
+    if (clean.empty()) {
+        return base_path_;
+    }
+    
+    return base_path_ + "/" + clean;
+}
+
+Result<void> Storage::create_file(const std::string& path) {
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    
+    std::string full_path = resolve_path(path);
+    FileDescriptor fd(::open(full_path.c_str(), O_CREAT | O_EXCL | O_WRONLY, FILE_MODE));
+    
+    if (!fd.valid()) {
+        int err = errno;
+        if (err == EEXIST) {
+            return Result<void>();
+        }
+        spdlog::error("Failed to create file {}: {}", path, std::strerror(err));
+        return Error::from_errno(err);
+    }
+    
+    spdlog::debug("Created file: {}", path);
+    return Result<void>();
+}
+
+Result<void> Storage::create_directory(const std::string& path) {
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    
+    std::string full_path = resolve_path(path);
+    
+    if (::mkdir(full_path.c_str(), DIR_MODE) == 0) {
+        spdlog::debug("Created directory: {}", path);
+        return Result<void>();
+    }
+    
+    int err = errno;
+    if (err == EEXIST) {
+        return Result<void>();
+    }
+    
+    spdlog::error("Failed to create directory {}: {}", path, std::strerror(err));
+    return Error::from_errno(err);
+}
+
+Result<std::vector<uint8_t>> Storage::read_file(const std::string& path) {
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    
+    std::string full_path = resolve_path(path);
+    FileDescriptor fd(::open(full_path.c_str(), O_RDONLY));
+    
+    if (!fd.valid()) {
+        int err = errno;
+        spdlog::error("Failed to open file {}: {}", path, std::strerror(err));
+        return Error::from_errno(err);
+    }
+    
     struct stat st;
-    if (fstat(fd, &st) != 0) {
+    if (::fstat(fd.get(), &st) != 0) {
         int err = errno;
-        close(fd);
-        spdlog::error("read_file: IO Error (Path = {})\n\t{}", path, strerror(errno));
-        return 0;
+        spdlog::error("Failed to stat file {}: {}", path, std::strerror(err));
+        return Error::from_errno(err);
     }
-
-    ssize_t total_read = 0;
-    while (total_read < st.st_size) {
-        ssize_t n = read(fd, buffer + total_read, st.st_size - total_read);
+    
+    if (st.st_size > MAX_FILE_SIZE) {
+        spdlog::error("File too large: {} ({} bytes)", path, st.st_size);
+        return Error(ErrorCode::IoError, "File too large");
+    }
+    
+    std::vector<uint8_t> buffer(st.st_size);
+    size_t total_read = 0;
+    
+    while (total_read < static_cast<size_t>(st.st_size)) {
+        ssize_t n = ::read(fd.get(), buffer.data() + total_read, st.st_size - total_read);
         if (n < 0) {
+            if (errno == EINTR) continue;
             int err = errno;
-            close(fd);
-            spdlog::error("read_file: IO Error (Path = {})\n\t{}", path, strerror(errno));
-            return 0;
+            spdlog::error("Failed to read file {}: {}", path, std::strerror(err));
+            return Error::from_errno(err);
         }
         if (n == 0) break;
         total_read += n;
     }
-
-    close(fd);
+    
+    buffer.resize(total_read);
     spdlog::debug("Read {} bytes from {}", total_read, path);
-    return total_read;
+    return buffer;
 }
 
-int Storage::write_file(const std::string& path, uint8_t* buffer, size_t size) {
-    std::string full_path = get_full_path(path);
+Result<void> Storage::write_file(const std::string& path, const uint8_t* buffer, size_t size) {
+    std::lock_guard<std::mutex> lock(io_mutex_);
     
-    int fd = open(full_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (fd < 0) return errno;
+    std::string full_path = resolve_path(path);
+    FileDescriptor fd(::open(full_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, FILE_MODE));
+    
+    if (!fd.valid()) {
+        int err = errno;
+        spdlog::error("Failed to open file for writing {}: {}", path, std::strerror(err));
+        return Error::from_errno(err);
+    }
     
     size_t total_written = 0;
     while (total_written < size) {
-        ssize_t n = write(fd, buffer + total_written, size - total_written);
+        ssize_t n = ::write(fd.get(), buffer + total_written, size - total_written);
         if (n < 0) {
+            if (errno == EINTR) continue;
             int err = errno;
-            close(fd);
-            return err;
+            spdlog::error("Failed to write to file {}: {}", path, std::strerror(err));
+            return Error::from_errno(err);
         }
         total_written += n;
     }
     
-    if (fsync(fd) != 0) {
+    if (::fsync(fd.get()) != 0) {
         int err = errno;
-        close(fd);
-        return err;
+        spdlog::error("Failed to sync file {}: {}", path, std::strerror(err));
+        return Error::from_errno(err);
     }
     
-    close(fd);
-    return 0;
+    spdlog::debug("Wrote {} bytes to {}", size, path);
+    return Result<void>();
 }
 
-int Storage::append_file(const std::string& path, uint8_t* buffer, size_t size) {
-    std::string full_path = get_full_path(path);
+Result<void> Storage::append_file(const std::string& path, const uint8_t* buffer, size_t size) {
+    std::lock_guard<std::mutex> lock(io_mutex_);
     
-    int fd = open(full_path.c_str(), O_WRONLY | O_APPEND | O_CREAT, 0644);
-    if (fd < 0) return errno;
+    std::string full_path = resolve_path(path);
+    FileDescriptor fd(::open(full_path.c_str(), O_WRONLY | O_APPEND | O_CREAT, FILE_MODE));
+    
+    if (!fd.valid()) {
+        int err = errno;
+        spdlog::error("Failed to open file for appending {}: {}", path, std::strerror(err));
+        return Error::from_errno(err);
+    }
     
     size_t total_written = 0;
     while (total_written < size) {
-        ssize_t n = write(fd, buffer + total_written, size - total_written);
+        ssize_t n = ::write(fd.get(), buffer + total_written, size - total_written);
         if (n < 0) {
+            if (errno == EINTR) continue;
             int err = errno;
-            close(fd);
-            return err;
+            spdlog::error("Failed to append to file {}: {}", path, std::strerror(err));
+            return Error::from_errno(err);
         }
         total_written += n;
     }
     
-    if (fsync(fd) != 0) {
+    if (::fsync(fd.get()) != 0) {
         int err = errno;
-        close(fd);
-        return err;
+        spdlog::error("Failed to sync file {}: {}", path, std::strerror(err));
+        return Error::from_errno(err);
     }
     
-    close(fd);
-    return 0;
+    spdlog::debug("Appended {} bytes to {}", size, path);
+    return Result<void>();
 }
 
-int Storage::rename_file(const std::string& old_path, const std::string& new_path) {
-    std::string full_old = get_full_path(old_path);
-    std::string full_new = get_full_path(new_path);
+Result<void> Storage::rename(const std::string& old_path, const std::string& new_path) {
+    std::lock_guard<std::mutex> lock(io_mutex_);
     
-    if (rename(full_old.c_str(), full_new.c_str()) == 0) {
-        return 0;
+    std::string full_old = resolve_path(old_path);
+    std::string full_new = resolve_path(new_path);
+    
+    if (::rename(full_old.c_str(), full_new.c_str()) == 0) {
+        spdlog::debug("Renamed {} to {}", old_path, new_path);
+        return Result<void>();
     }
     
-    return errno;
+    int err = errno;
+    spdlog::error("Failed to rename {} to {}: {}", old_path, new_path, std::strerror(err));
+    return Error::from_errno(err);
 }
 
-std::vector<std::string> Storage::list_directory(const std::string& path) {
-    std::string full_path = get_full_path(path);
-    std::vector<std::string> items;
+Result<void> Storage::delete_file(const std::string& path) {
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    
+    std::string full_path = resolve_path(path);
+    
+    if (::unlink(full_path.c_str()) == 0) {
+        spdlog::debug("Deleted file: {}", path);
+        return Result<void>();
+    }
+    
+    int err = errno;
+    if (err == ENOENT) {
+        return Result<void>();
+    }
+    
+    spdlog::error("Failed to delete file {}: {}", path, std::strerror(err));
+    return Error::from_errno(err);
+}
 
-    DIR* dir = opendir(full_path.c_str());
+Result<void> Storage::delete_directory(const std::string& path) {
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    
+    std::string full_path = resolve_path(path);
+    
+    if (::rmdir(full_path.c_str()) == 0) {
+        spdlog::debug("Deleted directory: {}", path);
+        return Result<void>();
+    }
+    
+    int err = errno;
+    if (err == ENOENT) {
+        return Result<void>();
+    }
+    
+    spdlog::error("Failed to delete directory {}: {}", path, std::strerror(err));
+    return Error::from_errno(err);
+}
+
+Result<std::vector<FileInfo>> Storage::list_directory(const std::string& path) {
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    
+    std::string full_path = resolve_path(path);
+    std::vector<FileInfo> items;
+    
+    DIR* dir = ::opendir(full_path.c_str());
     if (!dir) {
         int err = errno;
-        if (err == ENOENT) {
-            spdlog::error("list_directory: Directory not found (Path = {})", path);
-            return items;
-        }
-        spdlog::error("list_directory: IO Error (Path = {})", path);
-        return items;
+        spdlog::error("Failed to open directory {}: {}", path, std::strerror(err));
+        return Error::from_errno(err);
     }
-
+    
     struct dirent* entry;
-    while ((entry = readdir(dir)) != nullptr) {
+    while ((entry = ::readdir(dir)) != nullptr) {
         std::string name = entry->d_name;
         if (name == "." || name == "..") continue;
-        items.push_back(name);
+        
+        FileInfo info;
+        info.name = name;
+        
+        std::string entry_path = full_path + "/" + name;
+        struct stat st;
+        if (::stat(entry_path.c_str(), &st) == 0) {
+            info.is_directory = S_ISDIR(st.st_mode);
+            info.size = st.st_size;
+        } else {
+            info.is_directory = false;
+            info.size = 0;
+        }
+        
+        items.push_back(std::move(info));
     }
-
-    closedir(dir);
+    
+    ::closedir(dir);
+    spdlog::debug("Listed {} items in {}", items.size(), path);
     return items;
-}
-
-int Storage::delete_file(const std::string& path) {
-    std::string full_path = get_full_path(path);
-    
-    if (unlink(full_path.c_str()) == 0) {
-        return 0;
-    }
-    
-    if (errno == ENOENT) {
-        return 0;
-    }
-    
-    return errno;
-}
-
-int Storage::delete_directory(const std::string& path) {
-    std::string full_path = get_full_path(path);
-    
-    if (rmdir(full_path.c_str()) == 0) {
-        return 0;
-    }
-    
-    if (errno == ENOENT) {
-        return 0;
-    }
-    
-    return errno;
-}
-
-std::string Storage::get_full_path(const std::string& relative_path) const {
-    std::string clean_path = relative_path;
-    if (!clean_path.empty() && clean_path[0] == '/') {
-        clean_path = clean_path.substr(1);
-    }
-    
-    if (clean_path.empty()) {
-        return base_path_;
-    }
-    
-    return base_path_ + "/" + clean_path;
-}
-
-bool Storage::path_exists(const std::string& full_path) const {
-    struct stat st;
-    return ::stat(full_path.c_str(), &st) == 0;
-}
-
-bool Storage::is_directory(const std::string& full_path) const {
-    struct stat st;
-    if (::stat(full_path.c_str(), &st) != 0) {
-        return false;
-    }
-    return S_ISDIR(st.st_mode);
 }
 
 }
