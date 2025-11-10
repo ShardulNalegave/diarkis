@@ -12,7 +12,11 @@
 
 namespace diarkis {
 
-TcpConnection::TcpConnection(int socket_fd) : socket_fd_(socket_fd), connected_(true), remote_port_(0) {
+TcpConnection::TcpConnection(int socket_fd) 
+    : socket_fd_(socket_fd), 
+      connected_(true), 
+      remote_port_(0) {
+    
     sockaddr_in addr;
     socklen_t addr_len = sizeof(addr);
     if (getpeername(socket_fd_, (sockaddr*)&addr, &addr_len) == 0) {
@@ -31,7 +35,7 @@ TcpConnection::~TcpConnection() {
 }
 
 bool TcpConnection::send(const void* data, size_t size) {
-    if (!connected_.load() || socket_fd_ < 0) {
+    if (!connected_.load(std::memory_order_acquire) || socket_fd_ < 0) {
         return false;
     }
     
@@ -47,14 +51,14 @@ bool TcpConnection::send(const void* data, size_t size) {
             if (errno == EINTR) {
                 continue;
             }
-            spdlog::error("Send failed: {}", strerror(errno));
-            connected_.store(false);
+            spdlog::error("Send failed on {}:{}: {}", remote_addr_, remote_port_, strerror(errno));
+            connected_.store(false, std::memory_order_release);
             return false;
         }
         
         if (sent == 0) {
-            spdlog::warn("Connection closed by peer during send");
-            connected_.store(false);
+            spdlog::warn("Connection closed by peer during send: {}:{}", remote_addr_, remote_port_);
+            connected_.store(false, std::memory_order_release);
             return false;
         }
         
@@ -69,7 +73,7 @@ bool TcpConnection::send(const std::vector<uint8_t>& data) {
 }
 
 std::vector<uint8_t> TcpConnection::receive(size_t max_size) {
-    if (!connected_.load() || socket_fd_ < 0) {
+    if (!connected_.load(std::memory_order_acquire) || socket_fd_ < 0) {
         return {};
     }
     
@@ -83,14 +87,14 @@ std::vector<uint8_t> TcpConnection::receive(size_t max_size) {
         if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
             return {};
         }
-        spdlog::error("Receive failed: {}", strerror(errno));
-        connected_.store(false);
+        spdlog::error("Receive failed on {}:{}: {}", remote_addr_, remote_port_, strerror(errno));
+        connected_.store(false, std::memory_order_release);
         return {};
     }
     
     if (received == 0) {
         spdlog::info("Connection closed by peer: {}:{}", remote_addr_, remote_port_);
-        connected_.store(false);
+        connected_.store(false, std::memory_order_release);
         return {};
     }
     
@@ -99,7 +103,7 @@ std::vector<uint8_t> TcpConnection::receive(size_t max_size) {
 }
 
 bool TcpConnection::receive_exact(void* buffer, size_t size) {
-    if (!connected_.load() || socket_fd_ < 0) {
+    if (!connected_.load(std::memory_order_acquire) || socket_fd_ < 0) {
         return false;
     }
     
@@ -115,14 +119,14 @@ bool TcpConnection::receive_exact(void* buffer, size_t size) {
             if (errno == EINTR) {
                 continue;
             }
-            spdlog::error("Receive failed: {}", strerror(errno));
-            connected_.store(false);
+            spdlog::error("Receive failed on {}:{}: {}", remote_addr_, remote_port_, strerror(errno));
+            connected_.store(false, std::memory_order_release);
             return false;
         }
         
         if (received == 0) {
-            spdlog::warn("Connection closed during receive");
-            connected_.store(false);
+            spdlog::warn("Connection closed during receive from {}:{}", remote_addr_, remote_port_);
+            connected_.store(false, std::memory_order_release);
             return false;
         }
         
@@ -132,20 +136,8 @@ bool TcpConnection::receive_exact(void* buffer, size_t size) {
     return true;
 }
 
-std::string TcpConnection::remote_address() const {
-    return remote_addr_;
-}
-
-uint16_t TcpConnection::remote_port() const {
-    return remote_port_;
-}
-
-bool TcpConnection::is_connected() const {
-    return connected_.load();
-}
-
 void TcpConnection::close() {
-    if (connected_.exchange(false)) {
+    if (connected_.exchange(false, std::memory_order_acq_rel)) {
         std::lock_guard<std::mutex> lock(socket_mutex_);
         if (socket_fd_ >= 0) {
             ::shutdown(socket_fd_, SHUT_RDWR);
@@ -155,14 +147,11 @@ void TcpConnection::close() {
     }
 }
 
-TcpServer::TcpServer(const std::string& address, uint16_t port)
-    : address_(address),
-      port_(port),
+TcpServer::TcpServer(const Options& opts)
+    : options_(opts),
       server_fd_(-1),
       running_(false),
       should_stop_(false) {
-    
-    std::memset(&server_addr_, 0, sizeof(server_addr_));
 }
 
 TcpServer::~TcpServer() {
@@ -170,12 +159,12 @@ TcpServer::~TcpServer() {
 }
 
 bool TcpServer::start() {
-    if (running_.load()) {
+    if (running_.load(std::memory_order_acquire)) {
         spdlog::warn("TcpServer already running");
         return false;
     }
     
-    spdlog::info("Starting TcpServer on {}:{}", address_, port_);
+    spdlog::info("Starting TcpServer on {}:{}", options_.address, options_.port);
     
     if (!create_socket()) {
         return false;
@@ -191,8 +180,8 @@ bool TcpServer::start() {
         return false;
     }
     
-    running_.store(true);
-    should_stop_.store(false);
+    running_.store(true, std::memory_order_release);
+    should_stop_.store(false, std::memory_order_release);
     
     accept_thread_ = std::make_unique<std::thread>(&TcpServer::accept_loop, this);
     
@@ -201,20 +190,21 @@ bool TcpServer::start() {
 }
 
 void TcpServer::stop() {
-    if (!running_.load()) {
+    if (!running_.load(std::memory_order_acquire)) {
         return;
     }
     
     spdlog::info("Stopping TcpServer...");
     
-    should_stop_.store(true);
-    running_.store(false);
+    should_stop_.store(true, std::memory_order_release);
+    running_.store(false, std::memory_order_release);
     
     close_socket();
     
     if (accept_thread_ && accept_thread_->joinable()) {
         accept_thread_->join();
     }
+    accept_thread_.reset();
     
     cleanup_connections();
     
@@ -236,14 +226,14 @@ size_t TcpServer::active_connections() const {
 void TcpServer::accept_loop() {
     spdlog::info("Accept loop started");
     
-    while (!should_stop_.load()) {
+    while (!should_stop_.load(std::memory_order_acquire)) {
         sockaddr_in client_addr;
         socklen_t client_len = sizeof(client_addr);
         
         int client_fd = ::accept(server_fd_, (sockaddr*)&client_addr, &client_len);
         
         if (client_fd < 0) {
-            if (should_stop_.load()) {
+            if (should_stop_.load(std::memory_order_acquire)) {
                 break;
             }
             
@@ -261,11 +251,12 @@ void TcpServer::accept_loop() {
         
         spdlog::info("New connection from {}:{}", client_ip, client_port);
         
+        // Set TCP_NODELAY to disable Nagle's algorithm
         int flag = 1;
         setsockopt(client_fd, IPPROTO_TCP, TCP_NODELAY, &flag, sizeof(flag));
-        
+    
         struct timeval timeout;
-        timeout.tv_sec = SOCKET_TIMEOUT_SEC;
+        timeout.tv_sec = options_.socket_timeout_sec;
         timeout.tv_usec = 0;
         setsockopt(client_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
         setsockopt(client_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
@@ -289,13 +280,15 @@ void TcpServer::handle_connection(std::shared_ptr<TcpConnection> conn) {
             spdlog::warn("No connection handler set, closing connection");
         }
     } catch (const std::exception& e) {
-        spdlog::error("Exception in connection handler: {}", e.what());
+        spdlog::error("Exception in connection handler for {}:{}: {}", 
+                     conn->remote_address(), conn->remote_port(), e.what());
     }
     
     conn->close();
     remove_connection(conn);
     
-    spdlog::debug("Connection handler finished: {}:{}", conn->remote_address(), conn->remote_port());
+    spdlog::debug("Connection handler finished: {}:{}", 
+                 conn->remote_address(), conn->remote_port());
 }
 
 void TcpServer::add_connection(std::shared_ptr<TcpConnection> conn) {
@@ -346,34 +339,37 @@ bool TcpServer::create_socket() {
 }
 
 bool TcpServer::bind_socket() {
-    server_addr_.sin_family = AF_INET;
-    server_addr_.sin_port = htons(port_);
+    sockaddr_in server_addr;
+    std::memset(&server_addr, 0, sizeof(server_addr));
     
-    if (address_ == "0.0.0.0" || address_.empty()) {
-        server_addr_.sin_addr.s_addr = INADDR_ANY;
+    server_addr.sin_family = AF_INET;
+    server_addr.sin_port = htons(options_.port);
+    
+    if (options_.address == "0.0.0.0" || options_.address.empty()) {
+        server_addr.sin_addr.s_addr = INADDR_ANY;
     } else {
-        if (inet_pton(AF_INET, address_.c_str(), &server_addr_.sin_addr) <= 0) {
-            spdlog::error("Invalid address: {}", address_);
+        if (inet_pton(AF_INET, options_.address.c_str(), &server_addr.sin_addr) <= 0) {
+            spdlog::error("Invalid address: {}", options_.address);
             return false;
         }
     }
     
-    if (::bind(server_fd_, (sockaddr*)&server_addr_, sizeof(server_addr_)) < 0) {
-        spdlog::error("Failed to bind to {}:{}: {}", address_, port_, strerror(errno));
+    if (::bind(server_fd_, (sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
+        spdlog::error("Failed to bind to {}:{}: {}", options_.address, options_.port, strerror(errno));
         return false;
     }
     
-    spdlog::info("Bound to {}:{}", address_, port_);
+    spdlog::info("Bound to {}:{}", options_.address, options_.port);
     return true;
 }
 
 bool TcpServer::listen_socket() {
-    if (::listen(server_fd_, LISTEN_BACKLOG) < 0) {
+    if (::listen(server_fd_, options_.listen_backlog) < 0) {
         spdlog::error("Failed to listen: {}", strerror(errno));
         return false;
     }
     
-    spdlog::info("Listening with backlog: {}", LISTEN_BACKLOG);
+    spdlog::info("Listening with backlog: {}", options_.listen_backlog);
     return true;
 }
 
