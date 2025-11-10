@@ -7,6 +7,8 @@
 #include <string>
 #include <vector>
 #include <mutex>
+#include <condition_variable>
+#include <unordered_map>
 #include "diarkis/result.h"
 
 namespace diarkis {
@@ -15,6 +17,57 @@ struct FileInfo {
     std::string name;
     bool is_directory;
     size_t size;
+};
+
+class FileLocker {
+public:
+    FileLocker();
+    ~FileLocker();
+    
+    FileLocker(const FileLocker&) = delete;
+    FileLocker& operator=(const FileLocker&) = delete;
+    
+    void lock_read(const std::string& path);
+    void unlock_read(const std::string& path);
+    
+    void lock_write(const std::string& path);
+    void unlock_write(const std::string& path);
+
+private:
+    struct LockState {
+        int reader_count = 0;
+        bool write_locked = false;
+    };
+    
+    std::mutex mutex_;
+    std::condition_variable cv_;
+    std::unordered_map<std::string, LockState> locks_;
+};
+
+class ReadLock {
+public:
+    ReadLock(FileLocker& locker, const std::string& path);
+    ~ReadLock();
+    
+    ReadLock(const ReadLock&) = delete;
+    ReadLock& operator=(const ReadLock&) = delete;
+
+private:
+    FileLocker& locker_;
+    std::string path_;
+};
+
+class WriteLock {
+public:
+    WriteLock(FileLocker& locker, const std::string& path);
+    ~WriteLock();
+    
+    WriteLock(const WriteLock&) = delete;
+    WriteLock& operator=(const WriteLock&) = delete;
+
+private:
+    FileLocker& locker_;
+    std::string path_;
 };
 
 class Storage {
@@ -47,10 +100,10 @@ public:
 
 private:
     std::string resolve_path(const std::string& relative_path) const;
-    Result<void> ensure_parent_directory(const std::string& path) const;
+    Result<void> validate_path(const std::string& path) const;
     
     std::string base_path_;
-    mutable std::mutex io_mutex_;
+    FileLocker file_locker_;
 };
 
 }

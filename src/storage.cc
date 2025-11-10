@@ -8,6 +8,8 @@
 #include <dirent.h>
 #include <cerrno>
 #include <cstring>
+#include <sstream>
+#include <algorithm>
 
 namespace diarkis {
 
@@ -31,6 +33,158 @@ namespace {
     private:
         int fd_;
     };
+    
+    bool is_safe_path(const std::string& path) {
+        if (!path.empty() && path[0] == '/') {
+            return false;
+        }
+        
+        std::vector<std::string> components;
+        std::istringstream iss(path);
+        std::string component;
+        
+        while (std::getline(iss, component, '/')) {
+            if (component.empty() || component == ".") {
+                continue;
+            }
+            
+            if (component == "..") {
+                return false;
+            }
+            
+            components.push_back(component);
+        }
+        
+        for (const auto& comp : components) {
+            if (comp.find('\0') != std::string::npos) {
+                return false;
+            }
+        }
+        
+        return true;
+    }
+    
+    std::string normalize_path(const std::string& path) {
+        std::string result;
+        bool last_was_slash = false;
+        
+        for (char c : path) {
+            if (c == '/') {
+                if (!last_was_slash && !result.empty()) {
+                    result += c;
+                }
+                last_was_slash = true;
+            } else {
+                result += c;
+                last_was_slash = false;
+            }
+        }
+        
+        // Remove trailing slash
+        if (!result.empty() && result.back() == '/') {
+            result.pop_back();
+        }
+        
+        return result;
+    }
+}
+
+FileLocker::FileLocker() = default;
+FileLocker::~FileLocker() = default;
+
+void FileLocker::lock_read(const std::string& path) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    
+    while (true) {
+        auto it = locks_.find(path);
+        
+        if (it == locks_.end()) {
+            // no lock exists, create a read lock
+            locks_[path] = {1, false};
+            return;
+        }
+        
+        if (!it->second.write_locked) {
+            // already read-locked, increment counter
+            it->second.reader_count++;
+            return;
+        }
+        
+        // write lock exists, wait
+        cv_.wait(lock);
+    }
+}
+
+void FileLocker::unlock_read(const std::string& path) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    
+    auto it = locks_.find(path);
+    if (it == locks_.end()) {
+        spdlog::warn("Attempted to unlock_read non-existent lock for: {}", path);
+        return;
+    }
+    
+    it->second.reader_count--;
+    
+    if (it->second.reader_count == 0) {
+        locks_.erase(it);
+    }
+    
+    cv_.notify_all();
+}
+
+void FileLocker::lock_write(const std::string& path) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    
+    while (true) {
+        auto it = locks_.find(path);
+        
+        if (it == locks_.end()) {
+            // no lock exists, create a write lock
+            locks_[path] = {0, true};
+            return;
+        }
+        
+        if (it->second.reader_count == 0 && !it->second.write_locked) {
+            // no active locks, acquire write lock
+            it->second.write_locked = true;
+            return;
+        }
+        
+        // lock exists, wait
+        cv_.wait(lock);
+    }
+}
+
+void FileLocker::unlock_write(const std::string& path) {
+    std::unique_lock<std::mutex> lock(mutex_);
+    
+    auto it = locks_.find(path);
+    if (it == locks_.end()) {
+        spdlog::warn("Attempted to unlock_write non-existent lock for: {}", path);
+        return;
+    }
+    
+    locks_.erase(it);
+    cv_.notify_all();
+}
+
+ReadLock::ReadLock(FileLocker& locker, const std::string& path)
+    : locker_(locker), path_(path) {
+    locker_.lock_read(path_);
+}
+
+ReadLock::~ReadLock() {
+    locker_.unlock_read(path_);
+}
+
+WriteLock::WriteLock(FileLocker& locker, const std::string& path)
+    : locker_(locker), path_(path) {
+    locker_.lock_write(path_);
+}
+
+WriteLock::~WriteLock() {
+    locker_.unlock_write(path_);
 }
 
 Storage::Storage(std::string base_path) : base_path_(std::move(base_path)) {
@@ -61,8 +215,7 @@ Result<void> Storage::init() {
 }
 
 std::string Storage::resolve_path(const std::string& relative_path) const {
-    std::string clean = relative_path;
-    
+    std::string clean = normalize_path(relative_path);
     while (!clean.empty() && clean[0] == '/') {
         clean = clean.substr(1);
     }
@@ -74,8 +227,26 @@ std::string Storage::resolve_path(const std::string& relative_path) const {
     return base_path_ + "/" + clean;
 }
 
+Result<void> Storage::validate_path(const std::string& path) const {
+    if (path.length() > 4096) {
+        return Error(ErrorCode::InvalidPath, "Path too long");
+    }
+    
+    if (!is_safe_path(path)) {
+        spdlog::error("Path traversal attempt detected: {}", path);
+        return Error(ErrorCode::InvalidPath, "Invalid path: contains path traversal");
+    }
+    
+    return Result<void>();
+}
+
 Result<void> Storage::create_file(const std::string& path) {
-    std::lock_guard<std::mutex> lock(io_mutex_);
+    auto validation = validate_path(path);
+    if (!validation.ok()) {
+        return validation;
+    }
+    
+    WriteLock file_lock(file_locker_, path);
     
     std::string full_path = resolve_path(path);
     FileDescriptor fd(::open(full_path.c_str(), O_CREAT | O_EXCL | O_WRONLY, FILE_MODE));
@@ -94,7 +265,10 @@ Result<void> Storage::create_file(const std::string& path) {
 }
 
 Result<void> Storage::create_directory(const std::string& path) {
-    std::lock_guard<std::mutex> lock(io_mutex_);
+    auto validation = validate_path(path);
+    if (!validation.ok()) {
+        return validation;
+    }
     
     std::string full_path = resolve_path(path);
     
@@ -113,7 +287,12 @@ Result<void> Storage::create_directory(const std::string& path) {
 }
 
 Result<std::vector<uint8_t>> Storage::read_file(const std::string& path) {
-    std::lock_guard<std::mutex> lock(io_mutex_);
+    auto validation = validate_path(path);
+    if (!validation.ok()) {
+        return validation.error();
+    }
+    
+    ReadLock file_lock(file_locker_, path);
     
     std::string full_path = resolve_path(path);
     FileDescriptor fd(::open(full_path.c_str(), O_RDONLY));
@@ -157,7 +336,12 @@ Result<std::vector<uint8_t>> Storage::read_file(const std::string& path) {
 }
 
 Result<void> Storage::write_file(const std::string& path, const uint8_t* buffer, size_t size) {
-    std::lock_guard<std::mutex> lock(io_mutex_);
+    auto validation = validate_path(path);
+    if (!validation.ok()) {
+        return validation;
+    }
+    
+    WriteLock file_lock(file_locker_, path);
     
     std::string full_path = resolve_path(path);
     FileDescriptor fd(::open(full_path.c_str(), O_WRONLY | O_CREAT | O_TRUNC, FILE_MODE));
@@ -191,7 +375,12 @@ Result<void> Storage::write_file(const std::string& path, const uint8_t* buffer,
 }
 
 Result<void> Storage::append_file(const std::string& path, const uint8_t* buffer, size_t size) {
-    std::lock_guard<std::mutex> lock(io_mutex_);
+    auto validation = validate_path(path);
+    if (!validation.ok()) {
+        return validation;
+    }
+    
+    WriteLock file_lock(file_locker_, path);
     
     std::string full_path = resolve_path(path);
     FileDescriptor fd(::open(full_path.c_str(), O_WRONLY | O_APPEND | O_CREAT, FILE_MODE));
@@ -225,7 +414,18 @@ Result<void> Storage::append_file(const std::string& path, const uint8_t* buffer
 }
 
 Result<void> Storage::rename(const std::string& old_path, const std::string& new_path) {
-    std::lock_guard<std::mutex> lock(io_mutex_);
+    auto validation = validate_path(old_path);
+    if (!validation.ok()) {
+        return validation;
+    }
+    
+    validation = validate_path(new_path);
+    if (!validation.ok()) {
+        return validation;
+    }
+    
+    WriteLock old_lock(file_locker_, old_path);
+    WriteLock new_lock(file_locker_, new_path);
     
     std::string full_old = resolve_path(old_path);
     std::string full_new = resolve_path(new_path);
@@ -241,7 +441,12 @@ Result<void> Storage::rename(const std::string& old_path, const std::string& new
 }
 
 Result<void> Storage::delete_file(const std::string& path) {
-    std::lock_guard<std::mutex> lock(io_mutex_);
+    auto validation = validate_path(path);
+    if (!validation.ok()) {
+        return validation;
+    }
+    
+    WriteLock file_lock(file_locker_, path);
     
     std::string full_path = resolve_path(path);
     
@@ -260,7 +465,10 @@ Result<void> Storage::delete_file(const std::string& path) {
 }
 
 Result<void> Storage::delete_directory(const std::string& path) {
-    std::lock_guard<std::mutex> lock(io_mutex_);
+    auto validation = validate_path(path);
+    if (!validation.ok()) {
+        return validation;
+    }
     
     std::string full_path = resolve_path(path);
     
@@ -279,7 +487,10 @@ Result<void> Storage::delete_directory(const std::string& path) {
 }
 
 Result<std::vector<FileInfo>> Storage::list_directory(const std::string& path) {
-    std::lock_guard<std::mutex> lock(io_mutex_);
+    auto validation = validate_path(path);
+    if (!validation.ok()) {
+        return validation.error();
+    }
     
     std::string full_path = resolve_path(path);
     std::vector<FileInfo> items;
